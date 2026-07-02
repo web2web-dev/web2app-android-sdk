@@ -1,60 +1,118 @@
-# web2app Android SDK (скелет) — WEB-434
+# web2app Android SDK
 
-Тонкий Android-SDK для P10-моста web→app. **IP наш, MIT.** Модель B+C (тонкая обвязка над
-нашим backend, не полный native руками).
+Тонкий SDK, который связывает вашу веб-воронку с мобильным приложением: пользователь
+проходит воронку в вебе, устанавливает приложение — и приложение узнаёт, **кто это** и
+**что он оплатил**, чтобы сразу открыть платный контент. Матчинг «воронка → установка»
+делается на нашей стороне, вам не нужно писать его логику.
 
-> ⚠ **Статус: СКЕЛЕТ.** Реализовано по контрактам backend: R1-passthrough, APP_INSTALLED,
-> guid-persist, token/email-resolve, Install Referrer read. Полная раздача клиентам — после
-> достройки + POC (см. WEB-434).
+- Язык: Kotlin · Платформа: Android 7.0+ (minSdk 24) · Лицензия: MIT
+- Установка: Gradle через JitPack
+
+---
 
 ## Установка (Gradle через JitPack)
+
+**1. Добавьте репозиторий JitPack** (в `settings.gradle.kts`):
+
 ```kotlin
-// settings.gradle.kts (или build.gradle верхнего уровня) — репозиторий:
 dependencyResolutionManagement {
     repositories {
+        google()
+        mavenCentral()
         maven { url = uri("https://jitpack.io") }
     }
 }
+```
 
-// build.gradle.kts (app) — зависимость:
+**2. Добавьте зависимость** (в `build.gradle.kts` модуля приложения):
+
+```kotlin
 dependencies {
     implementation("com.github.web2web-dev:web2app-android-sdk:0.1.0")
 }
 ```
-JitPack собирает артефакт из тега этого репо (репо публичный). Сборка тега `0.1.0` проверена — status: ok.
 
-## API (4 точки, Web2Wave-стиль)
+---
+
+## Быстрый старт
+
+Три шага. Больше для базовой интеграции ничего не нужно.
+
 ```kotlin
-Web2AppSdk.configure(context, projectId = "proj_…", baseUrl = "https://api.…")
+import app.web2app.sdk.Web2AppSdk
 
-Web2AppSdk.identify(                       // Android сам читает Install Referrer
-    onResult = { r -> /* guid */ },
-    onNeedEmail = { /* показать экран email */ },
+// 1. Инициализация — один раз при старте приложения.
+Web2AppSdk.configure(
+    context,
+    projectId = "ВАШ_PROJECT_ID",                 // берётся в кабинете проекта
+    baseUrl = "https://api.testfunnelsdev.click"
 )
-Web2AppSdk.requestEmailRecovery(email) { _ -> }   // сервер шлёт magic-link (204)
 
-Web2AppSdk.entitlement { grant -> if (grant?.isActive == true) unlock() }   // R1 passthrough
+// 2. Идентификация при первом запуске.
+//    SDK сам читает Google Play Install Referrer — вам ничего передавать не нужно.
+Web2AppSdk.identify(
+    onResult = { result ->
+        result.onSuccess { guid -> /* пользователь опознан */ }
+    },
+    onNeedEmail = {
+        // атрибуции нет (sideload / органика) — покажите экран «введите email»
+        // и вызовите Web2AppSdk.requestEmailRecovery(...)
+    },
+)
+
+// 3. Проверка доступа — в любой момент, чтобы открыть/закрыть платный контент.
+Web2AppSdk.entitlement { grant ->
+    if (grant?.isActive == true) {
+        // разблокировать доступ
+    }
+}
 ```
 
-## Принципы (WEB-428)
-- `guid` = client-held ключ (EncryptedSharedPreferences); `email` = recovery.
-- **Свой fingerprint НЕ строим** — Install Referrer (детерминир.) + email-ядро.
-- `entitlement()` дословно проксирует наш R1 (не тронут).
+### Где взять Project ID
 
-## Backend-контракты (сверены с кодом)
-| Точка | Метод |
+В веб-кабинете: **проект → Настройки → «Подключение приложения» → «Полный мост»** —
+там показан ваш Project ID (можно скопировать) и готовые сниппеты.
+
+---
+
+## API
+
+| Метод | Назначение |
 |---|---|
-| Entitlement (R1) | `GET /public/entitlement?guid=` → `{grants:[…]}` |
-| App-installed | `POST /public/handoff/app-callback` → 204 |
-| Token→guid | `GET /public/handoff/resolve?code=` → `{guid}` |
-| Email-recovery | `POST /public/handoff/email-recovery/request` → 204 (magic-link) |
+| `configure(context, projectId, baseUrl)` | Инициализация SDK. Вызвать один раз при старте. |
+| `identify(onResult, onNeedEmail)` | Опознать пользователя. Android сам читает Install Referrer; при промахе — `onNeedEmail`. |
+| `requestEmailRecovery(email, onResult)` | Запросить восстановление по email — мы отправим пользователю ссылку-магнит. |
+| `entitlement { grant -> }` | Получить текущий доступ (`grant.isActive`, `level`, `status`, `expiresAt`). |
+| `currentGuid()` | Текущий идентификатор пользователя (если уже опознан). |
 
-## Сборка
-```
-./gradlew assembleRelease      # AAR
-./gradlew publishToMavenLocal   # локальная проверка публикации (после настройки Maven)
-```
-minSdk 24, JDK 17, AGP 8.5, Gradle 8.9.
+Восстановление по email — два шага: `requestEmailRecovery(email)` отправляет пользователю
+письмо со ссылкой; когда он по ней перейдёт, приложение получит код из диплинка и передаёт
+его в `identifyWithDeepLinkValue(code)`.
+
+---
+
+## Как это работает
+
+1. Пользователь проходит вашу веб-воронку — мы знаем, кто он и что оплатил.
+2. Он переходит в Google Play и ставит приложение. Идентификатор доезжает через
+   **Install Referrer** — SDK читает его автоматически при первом запуске.
+3. SDK опознаёт пользователя через наш сервер и связывает установку с вашим проектом.
+4. `entitlement()` возвращает актуальный доступ — вы открываете платный контент.
+
+---
+
+## Приватность
+
+- Идентификатор пользователя (`guid`) хранится в EncryptedSharedPreferences, никакой
+  рекламный трекинг SDK сам не ведёт.
+- Зависимости: Google Play Install Referrer, AndroidX Security-Crypto.
+
+---
 
 ## iOS
-Отдельный репо: https://github.com/web2web-dev/web2app-ios-sdk
+
+Отдельный пакет: https://github.com/web2web-dev/web2app-ios-sdk
+
+## Лицензия
+
+MIT.
