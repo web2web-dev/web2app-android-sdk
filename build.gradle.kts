@@ -2,6 +2,7 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
 }
 
 android {
@@ -16,6 +17,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    // maven-publish: единственный release-вариант + sources для потребителей (JitPack).
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
 }
 
 dependencies {
@@ -26,4 +33,18 @@ dependencies {
     // MMP-SDK (AppsFlyer/Adjust) — НЕ зависимость SDK: интегратор передаёт deep_link_value
     // из своего MMP-callback в Web2App.identify(...). См. README (POC-1).
     testImplementation("junit:junit:4.13.2")
+}
+
+// JitPack/Maven-публикация. group = com.github.web2web-dev (JitPack-конвенция по GitHub-орг).
+afterEvaluate {
+    publishing {
+        publications {
+            register<MavenPublication>("release") {
+                from(components["release"])
+                groupId = "com.github.web2web-dev"
+                artifactId = "web2app-android-sdk"
+                version = "0.1.0"
+            }
+        }
+    }
 }
