@@ -7,14 +7,21 @@
 > guid-persist, token/email-resolve, Install Referrer read. Полная раздача клиентам — после
 > достройки + POC (см. WEB-434).
 
-## Установка (Gradle)
-После публикации в Maven Central (`mavenCentral()` уже подключён по умолчанию):
+## Установка (Gradle через JitPack)
 ```kotlin
+// settings.gradle.kts (или build.gradle верхнего уровня) — репозиторий:
+dependencyResolutionManagement {
+    repositories {
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+
+// build.gradle.kts (app) — зависимость:
 dependencies {
-    implementation("io.github.web2web-dev:web2app-sdk:0.1.0")
+    implementation("com.github.web2web-dev:web2app-android-sdk:0.1.0")
 }
 ```
-(До публикации — собирается из исходников этого репо.)
+JitPack собирает артефакт из тега этого репо (репо публичный). Сборка тега `0.1.0` проверена — status: ok.
 
 ## API (4 точки, Web2Wave-стиль)
 ```kotlin
