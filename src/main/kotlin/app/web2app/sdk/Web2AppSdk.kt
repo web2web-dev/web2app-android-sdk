@@ -1,6 +1,9 @@
 package app.web2app.sdk
 
 import android.content.Context
+import android.net.Uri
+import androidx.browser.customtabs.CustomTabsIntent
+import java.util.UUID
 
 /**
  * web2app SDK — публичная поверхность (4 точки, Web2Wave-стиль). WEB-434.
@@ -89,6 +92,48 @@ object Web2AppSdk {
     /** Текущий guid (client-held ключ). */
     fun currentGuid(): String? =
         if (::guidStore.isInitialized) guidStore.load() else null
+
+    /**
+     * WEB-525 R2 — обратный флоу app→web-paywall. Показывает веб-пейвол органик-юзеру
+     * (пришёл в прилку НЕ через воронку) в Chrome Custom Tab и возвращает право после оплаты.
+     *
+     * Возврат = **guid-поллинг** (ратиф. PM 2026-07-07): SDK кейит checkout на СВОЙ guid
+     * (`?origin=app&email=&guid=`), затем поллит [entitlement] по нему — БЕЗ resolve-by-email
+     * (тот S2S-HMAC, мобильному недоступен). Custom Tab не даёт надёжного close-колбэка, поэтому
+     * поллинг стартует сразу после запуска (юзер платит и возвращается — грант ловится в окне).
+     *
+     * [paywallUrl] — URL опубликованного веб-пейвола (кастом-домен клиента; наши apex/поддомены
+     * пейволы не отдают — WEB-395). [email] — опц. prefill (юзер может поправить на вебе).
+     * [onResult] — активный [EntitlementGrant] или null, если за окно право не появилось.
+     *
+     * ⚠ MVP-1: принимает готовый [paywallUrl]. Серверный резолв projectId→дефолт-пейвол-URL —
+     * отдельный follow-up.
+     */
+    fun openWebPaywall(
+        context: Context,
+        paywallUrl: String,
+        email: String? = null,
+        onResult: (EntitlementGrant?) -> Unit = {},
+    ) {
+        val cfg = config ?: return onResult(null)
+
+        // guid-поллинг: берём client-held guid или чеканим новый — grant на вебе ляжет на него.
+        val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
+            ?: UUID.randomUUID().toString()
+        if (::guidStore.isInitialized) guidStore.save(guid)
+
+        val url = WebPaywallLauncher.appOriginUrl(paywallUrl, email, guid)
+        CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
+
+        // Поллим право по нашему guid: 30 попыток × 2с ≈ 60с (покрывает Stripe webhook→grant).
+        val client = EntitlementClient(cfg)
+        WebPaywallLauncher.pollForActiveGrant(
+            intervalMs = 2_000,
+            maxAttempts = 30,
+            fetch = { cb -> client.fetch(guid, cb) },
+            completion = onResult,
+        )
+    }
 
     /**
      * DEBUG-only (для симулятор/эмулятор/девайс-теста без реальной атрибуции): инъекция guid.

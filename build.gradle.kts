@@ -30,6 +30,8 @@ dependencies {
     implementation("com.android.installreferrer:installreferrer:2.2")
     // EncryptedSharedPreferences для guid-персиста (client-held ключ).
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // WEB-525: Chrome Custom Tabs — открытие веб-пейвола в openWebPaywall (обратный флоу).
+    implementation("androidx.browser:browser:1.7.0")
     // MMP-SDK (AppsFlyer/Adjust) — НЕ зависимость SDK: интегратор передаёт deep_link_value
     // из своего MMP-callback в Web2App.identify(...). См. README (POC-1).
     testImplementation("junit:junit:4.13.2")
