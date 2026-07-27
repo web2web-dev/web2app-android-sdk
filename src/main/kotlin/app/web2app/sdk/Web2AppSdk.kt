@@ -136,6 +136,131 @@ object Web2AppSdk {
     }
 
     /**
+     * WEB-813 — обработчик возвратного deep-link'а из веб-пейволла (паритет iOS
+     * handleReturnURL 0.3.0): кнопка «Закрыть» на success-экране ведёт на
+     * `<схема-прилки>://handoff?code=...` (WEB-800). Интегратор: (1) объявляет
+     * intent-filter своей схемы и указывает её в кабинете проекта
+     * (bridgeConfig.returnScheme); (2) зовёт этот метод из onCreate/onNewIntent
+     * для ВСЕХ входящих deep-link — чужие вернут false.
+     *
+     * При распознавании: приложение уже на переднем плане (deep-link вывел его
+     * поверх Custom Tab) — SDK запускает НЕМЕДЛЕННЫЙ короткий поллинг права
+     * (не ждёт планового окна исходного openWebPaywall) и отдаёт грант в
+     * [onResult]. `code` из ссылки намеренно НЕ консьюмится: доступ приходит по
+     * guid, а токен остаётся валидным для магик-линк письма.
+     */
+    @JvmOverloads
+    fun handleReturnUrl(
+        url: String,
+        onResult: (EntitlementGrant?) -> Unit = {},
+    ): Boolean {
+        if (!WebPaywallLauncher.isHandoffReturnUrl(url)) return false
+        val cfg = config
+        val guid = if (::guidStore.isInitialized) guidStore.load() else null
+        if (cfg == null || guid == null) {
+            onResult(null)
+            return true
+        }
+        val client = EntitlementClient(cfg)
+        WebPaywallLauncher.pollForActiveGrant(
+            intervalMs = 1_000,
+            maxAttempts = 10,
+            fetch = { cb -> client.fetch(guid, cb) },
+            completion = onResult,
+        )
+        return true
+    }
+
+    /** Перегрузка для intent.data. */
+    @JvmOverloads
+    fun handleReturnUrl(
+        uri: Uri,
+        onResult: (EntitlementGrant?) -> Unit = {},
+    ): Boolean = handleReturnUrl(uri.toString(), onResult)
+
+    /**
+     * WEB-814 — открытие веб-пейволла ПО ID (паритет iOS openWebPaywall(paywallId:)
+     * 0.4.0): интегратор знает только `paywallId` из кабинета — SDK резолвит
+     * публичный URL через `GET /public/paywall-url/:paywallId` (пейволл должен
+     * быть опубликован и привязан к домену; иначе 404 → onResult(null)) и
+     * открывает его существующим [openWebPaywall]-флоу.
+     */
+    fun openWebPaywallById(
+        context: Context,
+        paywallId: String,
+        email: String? = null,
+        onResult: (EntitlementGrant?) -> Unit = {},
+    ) {
+        resolvePaywallUrl(paywallId) { url ->
+            if (url == null) onResult(null)
+            else openWebPaywall(context, url, email, onResult)
+        }
+    }
+
+    /**
+     * WEB-814 — встроенный показ веб-пейволла (паритет iOS openWebPaywallEmbedded
+     * 0.4.0): full-screen WebView + JS-мост `web2appBridge`. На успех оплаты
+     * пейволл закрывается АВТОМАТИЧЕСКИ (страница шлёт событие мосту), кнопка
+     * «Закрыть» тоже идёт мостом — URL-схема не нужна. Результат типизирован:
+     * [PaywallResult.Paid] / [PaywallResult.NotPaid] / [PaywallResult.Pending].
+     */
+    fun openWebPaywallEmbedded(
+        context: Context,
+        paywallUrl: String,
+        email: String? = null,
+        onResult: (PaywallResult) -> Unit,
+    ) {
+        val cfg = config ?: return onResult(PaywallResult.NotPaid)
+        val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
+            ?: UUID.randomUUID().toString()
+        if (::guidStore.isInitialized) guidStore.save(guid)
+
+        val url = WebPaywallLauncher.appOriginUrl(paywallUrl, email, guid)
+        val client = EntitlementClient(cfg)
+        val callbackId = UUID.randomUUID().toString()
+        EmbeddedPaywallCallbacks.register(callbackId) { event ->
+            // Успех с моста → грант уже записан (ранний грант на бэке) —
+            // короткий поллинг добирает его; закрытие без успеха → быстрый
+            // одиночный чек (вдруг оплатил, но событие не дошло).
+            val attempts = if (event == BridgeEvent.PAYMENT_SUCCESS) 10 else 2
+            WebPaywallLauncher.pollForActiveGrant(
+                intervalMs = 1_000,
+                maxAttempts = attempts,
+                fetch = { cb -> client.fetch(guid, cb) },
+            ) { grant ->
+                when {
+                    grant != null -> onResult(PaywallResult.Paid(grant))
+                    event == BridgeEvent.PAYMENT_SUCCESS -> onResult(PaywallResult.Pending)
+                    else -> onResult(PaywallResult.NotPaid)
+                }
+            }
+        }
+        EmbeddedPaywallActivity.start(context, url, callbackId)
+    }
+
+    /** Встроенный показ по paywallId — резолв той же публичной ручкой. */
+    fun openWebPaywallEmbeddedById(
+        context: Context,
+        paywallId: String,
+        email: String? = null,
+        onResult: (PaywallResult) -> Unit,
+    ) {
+        resolvePaywallUrl(paywallId) { url ->
+            if (url == null) onResult(PaywallResult.NotPaid)
+            else openWebPaywallEmbedded(context, url, email, onResult)
+        }
+    }
+
+    private fun resolvePaywallUrl(paywallId: String, onResult: (String?) -> Unit) {
+        val cfg = config ?: return onResult(null)
+        Http.io {
+            val encoded = java.net.URLEncoder.encode(paywallId, "UTF-8")
+            val body = Http.get("${cfg.baseUrl}/public/paywall-url/$encoded")
+            onResult(WebPaywallLauncher.parsePaywallUrlResponse(body))
+        }
+    }
+
+    /**
      * DEBUG-only (для симулятор/эмулятор/девайс-теста без реальной атрибуции): инъекция guid.
      * ⚠ Вызывать ТОЛЬКО под `if (BuildConfig.DEBUG)` — в проде не использовать.
      */

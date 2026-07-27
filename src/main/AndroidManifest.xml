@@ -2,4 +2,11 @@
 <!-- web2app SDK (скелет, WEB-434). INTERNET нужен для entitlement/app-callback/resolve. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <application>
+        <!-- WEB-814: embedded-показ веб-пейволла (WebView + JS-мост). -->
+        <activity
+            android:name=".EmbeddedPaywallActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen" />
+    </application>
 </manifest>

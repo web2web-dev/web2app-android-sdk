@@ -35,6 +35,37 @@ internal object WebPaywallLauncher {
     }
 
     /**
+     * WEB-813 — возвратный deep-link кнопки «Закрыть» на success-экране
+     * (контракт WEB-800): `<схема-прилки>://handoff?code=...`. Распознаём по
+     * host == "handoff" (case-insensitive); СХЕМУ не проверяем — она
+     * клиентская и SDK неизвестна. Паритет iOS isHandoffReturnURL.
+     * Чистая JVM (без android.net.Uri) — юнит-тестируемо.
+     */
+    fun isHandoffReturnUrl(url: String): Boolean {
+        val afterScheme = url.substringAfter("://", missingDelimiterValue = "")
+        if (afterScheme.isEmpty()) return false
+        val host = afterScheme.takeWhile { it != '/' && it != '?' && it != '#' }
+        return host.lowercase() == "handoff"
+    }
+
+    /**
+     * WEB-814 — парсинг ответа `GET /public/paywall-url/:paywallId` →
+     * URL опубликованного пейволла. Форма: `{"success":true,"data":{"url":"..."}}`.
+     * Мусор/404-тело → null (совместимо с anti-enum бэка). Узкий regex-парс
+     * вместо org.json — тот в JVM-юнитах Android-заглушка.
+     */
+    fun parsePaywallUrlResponse(body: String?): String? {
+        if (body == null) return null
+        val match =
+            Regex("\"url\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").find(body)
+                ?: return null
+        val raw = match.groupValues[1]
+            .replace("\\/", "/")
+            .replace("\\\"", "\"")
+        return if (raw.startsWith("http://") || raw.startsWith("https://")) raw else null
+    }
+
+    /**
      * Поллит [fetch] каждые [intervalMs] мс до [maxAttempts] попыток. Останавливается и отдаёт
      * грант, как только он active; отдаёт null, если active-грант не появился в бюджете попыток.
      * [fetch] инъектируется (сеть/тест) — оркестрация POC-независима. Задержка между попытками

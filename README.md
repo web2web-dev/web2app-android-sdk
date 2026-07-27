@@ -84,6 +84,11 @@ Web2AppSdk.entitlement { grant ->
 | `requestEmailRecovery(email, onResult)` | Запросить восстановление по email — мы отправим пользователю ссылку-магнит. |
 | `entitlement { grant -> }` | Получить текущий доступ (`grant.isActive`, `level`, `status`, `expiresAt`). |
 | `currentGuid()` | Текущий идентификатор пользователя (если уже опознан). |
+| `openWebPaywall(context, paywallUrl, email) { grant -> }` | Показать веб-пейволл в Chrome Custom Tab; доступ придёт по guid-поллингу. |
+| `openWebPaywallById(context, paywallId, email) { grant -> }` | То же по ID пейволла из кабинета — URL резолвится сам. |
+| `openWebPaywallEmbedded(context, paywallUrl, email) { result -> }` | Встроенный показ (WebView + JS-мост): авто-закрытие на успехе, типизированный `PaywallResult`. |
+| `openWebPaywallEmbeddedById(context, paywallId, email) { result -> }` | Встроенный показ по ID пейволла. |
+| `handleReturnUrl(uri) { grant -> }` | Обработать возвратную ссылку `<схема>://handoff` (кнопка «Закрыть» на success-экране). |
 
 Восстановление по email — два шага: `requestEmailRecovery(email)` отправляет пользователю
 письмо со ссылкой; когда он по ней перейдёт, приложение получит код из диплинка и передаёт
@@ -98,6 +103,64 @@ Web2AppSdk.entitlement { grant ->
    **Install Referrer** — SDK читает его автоматически при первом запуске.
 3. SDK опознаёт пользователя через наш сервер и связывает установку с вашим проектом.
 4. `entitlement()` возвращает актуальный доступ — вы открываете платный контент.
+
+---
+
+## Возврат из веб-пейволла по своей схеме (handleReturnUrl)
+
+Если вы открываете веб-пейволл через `openWebPaywall` (внешний Custom Tab),
+кнопка «Закрыть» на экране после оплаты может вернуть пользователя прямо в
+приложение по вашей URL-схеме. Настройка:
+
+1. Объявите intent-filter своей схемы в манифесте (activity, которая примет возврат):
+
+```xml
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="mycoolapp" />
+</intent-filter>
+```
+
+2. Укажите ту же схему в кабинете проекта (настройки подключения приложения —
+   поле «Схема возврата»). Ссылка кнопки станет `mycoolapp://handoff?code=...`.
+
+3. Передавайте ВСЕ входящие deep-link в SDK — чужие он вернёт `false`:
+
+```kotlin
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    intent?.data?.let { uri ->
+        Web2AppSdk.handleReturnUrl(uri) { grant ->
+            if (grant?.isActive == true) unlockPremium()
+        }
+    }
+}
+```
+
+При распознавании SDK сразу коротко поллит доступ (не ждёт планового окна) —
+пользователь возвращается «уже платным». `code` из ссылки SDK намеренно не
+использует: доступ приходит по guid, а токен остаётся валидным для письма.
+
+## Встроенный веб-пейволл (WebView + JS-мост)
+
+`openWebPaywallEmbedded` показывает пейволл во встроенном WebView. Страница
+сама сообщает SDK об успехе оплаты — пейволл закрывается автоматически, схема
+возврата не нужна. Результат типизирован:
+
+```kotlin
+Web2AppSdk.openWebPaywallEmbedded(context, paywallUrl = url) { result ->
+    when (result) {
+        is PaywallResult.Paid -> unlockPremium(result.grant)
+        PaywallResult.Pending -> showProcessing() // перепроверьте entitlement позже
+        PaywallResult.NotPaid -> keepFreeTier()
+    }
+}
+```
+
+Открытие по ID (`openWebPaywallById` / `openWebPaywallEmbeddedById`): пейволл
+должен быть опубликован и привязан к домену — иначе колбэк получит null/NotPaid.
 
 ---
 
