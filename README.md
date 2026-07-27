@@ -101,6 +101,36 @@ Web2AppSdk.entitlement { grant ->
 
 ---
 
+## Возврат в приложение (App Links): что передать владельцу воронки (WEB-802)
+
+Чтобы возвратные ссылки после оплаты (в т.ч. из письма) открывали ваше
+приложение, владелец воронки вписывает в кабинете (Настройки проекта →
+Подключение приложения → App ID) два значения, которые даёте вы:
+
+- **Package name** — `applicationId` из `build.gradle` модуля приложения,
+  например `com.example.android`.
+- **SHA-256 отпечаток ключа подписи** — строго из **Play Console → Настройки →
+  Целостность приложения → Подпись приложений** (ключ, которым подписывает
+  Google Play при публикации). ⚠ НЕ локальный upload-key (`keytool` по своему
+  keystore даёт другой отпечаток) — это самая частая ошибка, при ней App Links
+  молча не работают.
+
+После сохранения файл `/.well-known/assetlinks.json` на домене возврата отдаёт
+конфигурацию автоматически. На вашей стороне — intent-filter на домен возврата
+с автопроверкой:
+
+```xml
+<intent-filter android:autoVerify="true">
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="https" android:host="<projectId>.go.<домен>" />
+</intent-filter>
+```
+
+Код из пути (`/handoff/<КОД>`) обрабатывается так же, как в iOS-версии:
+резолв через `GET /public/handoff/resolve?code=` → `identify(guid)`.
+
 ## Приватность
 
 - Идентификатор пользователя (`guid`) хранится в EncryptedSharedPreferences, никакой
