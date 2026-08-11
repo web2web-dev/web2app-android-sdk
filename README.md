@@ -89,6 +89,7 @@ Web2AppSdk.entitlement { grant ->
 | `openWebPaywallEmbedded(context, paywallUrl, email) { result -> }` | Встроенный показ (WebView + JS-мост): авто-закрытие на успехе, типизированный `PaywallResult`. |
 | `openWebPaywallEmbeddedById(context, paywallId, email) { result -> }` | Встроенный показ по ID пейволла. |
 | `handleReturnUrl(uri) { grant -> }` | Обработать возвратную ссылку `<схема>://handoff` (кнопка «Закрыть» на success-экране). |
+| `identifyWithDeepLinkValue(code) { result -> }` | Опознать по одноразовому коду — из ссылки в письме после оплаты или из MMP-коллбека (AppsFlyer/Adjust). Возвращает `guid`. |
 
 Восстановление по email — два шага: `requestEmailRecovery(email)` отправляет пользователю
 письмо со ссылкой; когда он по ней перейдёт, приложение получит код из диплинка и передаёт
@@ -191,8 +192,58 @@ Web2AppSdk.openWebPaywallEmbedded(context, paywallUrl = url) { result ->
 </intent-filter>
 ```
 
-Код из пути (`/handoff/<КОД>`) обрабатывается так же, как в iOS-версии:
-резолв через `GET /public/handoff/resolve?code=` → `identify(guid)`.
+Как обработать код из пути — раздел «Ссылка из письма после оплаты» ниже.
+
+## Ссылка из письма после оплаты (App Link)
+
+После успешной оплаты покупателю приходит письмо со ссылкой вида
+`https://<projectId>.go.<домен>/handoff/<КОД>` — одноразовый 8-символьный код в
+пути. Если App Links настроены (раздел выше), Android откроет ваше приложение —
+обработчик пишете вы (ссылка приходит приложению, SDK перехватить её не может):
+
+```kotlin
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    handleIncomingLink(intent)
+}
+
+override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    handleIncomingLink(intent)
+}
+
+private fun handleIncomingLink(intent: Intent?) {
+    val uri = intent?.data ?: return
+    // 1) Кнопка «Закрыть» с веб-пейволла (<схема>://handoff?...) — отдаём SDK,
+    //    чужие ссылки он вернёт false и можно обрабатывать свои deep-link'и.
+    if (Web2AppSdk.handleReturnUrl(uri) { grant ->
+            if (grant?.isActive == true) unlockPremium()
+        }
+    ) return
+    // 2) Ссылка из письма: https-ссылка с кодом в пути /handoff/<КОД>
+    val seg = uri.pathSegments
+    if (seg.size >= 2 && seg[0] == "handoff") {
+        Web2AppSdk.identifyWithDeepLinkValue(seg[1]) { result ->
+            result.onSuccess {
+                Web2AppSdk.entitlement { grant ->
+                    if (grant?.isActive == true) unlockPremium()
+                }
+            }.onFailure {
+                // Код одноразовый (повторный тап по письму = ошибка). guid уже
+                // мог быть сохранён ранее — сперва проверьте entitlement(), и
+                // только при пустом ответе показывайте экран «введите email» с
+                // requestEmailRecovery(email).
+            }
+        }
+    }
+}
+```
+
+Не путать с кнопкой «Закрыть»: её ссылка — кастомная схема
+`<схема>://handoff?code=...`, она обрабатывается `handleReturnUrl(uri)` и код
+намеренно не тратит (доступ приходит по guid-поллингу). Ссылка из письма —
+https App Link с кодом в пути, её обрабатывает `identifyWithDeepLinkValue(code)`
+и код расходует.
 
 ## Приватность
 
