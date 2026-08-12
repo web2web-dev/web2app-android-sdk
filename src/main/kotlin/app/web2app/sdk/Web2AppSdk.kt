@@ -29,6 +29,13 @@ object Web2AppSdk {
     private var config: Web2AppConfig? = null
     private lateinit var guidStore: GuidStore
 
+    /**
+     * Слушатель событий воронки ([setFunnelEventListener]). `@Volatile` —
+     * пишется с потока интегратора, читается с потока JavascriptInterface.
+     */
+    @Volatile
+    private var funnelEventListener: ((String, FunnelEventData) -> Unit)? = null
+
     /** Инициализация. [projectId] = ключ проекта арендатора; [baseUrl] = наш API. */
     fun configure(context: Context, projectId: String, baseUrl: String) {
         config = Web2AppConfig(projectId, baseUrl.trimEnd('/'))
@@ -298,6 +305,42 @@ object Web2AppSdk {
             if (url == null) deliver(PaywallResult.Unavailable)
             else openWebPaywallEmbeddedInternal(context, url, email, deliver)
         }
+    }
+
+    /**
+     * Б-1 — слушатель событий воронки из встроенного показа (WebView-мост).
+     *
+     * Страница шлёт события прохождения квиза (`quiz_start`, `quiz_screen_view`,
+     * `quiz_answer`, `quiz_email_submit`, `quiz_complete`) и пейволла
+     * (`paywall_result`, `close`). Слушатель получает имя события и безопасные
+     * поля ([FunnelEventData]) — PII в мост не уходит.
+     *
+     * ⚠ События воронки НИЧЕГО не закрывают: показ завершают ровно
+     * `paywall_result:success` и `close` (см. [BridgeEventParser.terminalEvent]).
+     *
+     * Колбэк приходит на ГЛАВНЫЙ поток — из него можно сразу трогать UI
+     * (общее правило SDK, см. [MainThread]).
+     *
+     * ```
+     * Web2AppSdk.setFunnelEventListener { name, data ->
+     *     analytics.log(name, mapOf("screen" to data.screenIndex))
+     * }
+     * ```
+     *
+     * `null` — отписаться.
+     */
+    fun setFunnelEventListener(listener: ((name: String, data: FunnelEventData) -> Unit)?) {
+        funnelEventListener = listener
+    }
+
+    /**
+     * Точка входа моста. Слушателя нет → не делаем даже прыжка на главный поток.
+     * Обёртка [MainThread] здесь ровно одна — событие рождается на потоке
+     * JavascriptInterface.
+     */
+    internal fun emitFunnelEvent(name: String, data: FunnelEventData) {
+        val listener = funnelEventListener ?: return
+        MainThread.post { listener(name, data) }
     }
 
     private fun resolvePaywallUrl(paywallId: String, onResult: (String?) -> Unit) {

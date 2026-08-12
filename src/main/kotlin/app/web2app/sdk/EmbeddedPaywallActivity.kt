@@ -126,13 +126,21 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     }
 
     private inner class Bridge {
-        /** Страница: `window.web2appBridge.postMessage(JSON.stringify({...}))`. */
+        /**
+         * Страница: `window.web2appBridge.postMessage(JSON.stringify({...}))`.
+         *
+         * Б-1: маршрут один — [BridgeMessageRouter]. Событие уходит слушателю
+         * интегратора, а окно закрывается ТОЛЬКО на терминальном (их ровно два).
+         * До Б-1 закрывалось любое распознанное событие — с событиями квиза это
+         * схлопнуло бы воронку на первом же экране.
+         */
         @JavascriptInterface
         fun postMessage(json: String?) {
-            val event = BridgeEventParser.parse(json) ?: return
-            runOnUiThread {
-                deliver(event)
-                finish()
+            BridgeMessageRouter.route(json) { event ->
+                runOnUiThread {
+                    deliver(event)
+                    finish()
+                }
             }
         }
     }

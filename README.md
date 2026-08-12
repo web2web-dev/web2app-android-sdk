@@ -90,6 +90,7 @@ Web2AppSdk.entitlement { grant ->
 | `openWebPaywallEmbeddedById(context, paywallId, email) { result -> }` | Встроенный показ по ID пейволла. |
 | `handleReturnUrl(uri) { grant -> }` | Обработать возвратную ссылку `<схема>://handoff` (кнопка «Закрыть» на success-экране). |
 | `identifyWithDeepLinkValue(code) { result -> }` | Опознать по одноразовому коду — из ссылки в письме после оплаты или из MMP-коллбека (AppsFlyer/Adjust). Возвращает `guid`. |
+| `setFunnelEventListener { name, data -> }` | Слушать события прохождения квиза из встроенного показа. Пейволл они не закрывают — см. раздел ниже. |
 
 Восстановление по email — два шага: `requestEmailRecovery(email)` отправляет пользователю
 письмо со ссылкой; когда он по ней перейдёт, приложение получит код из диплинка и передаёт
@@ -178,6 +179,54 @@ null (не-embedded) / `Unavailable` (embedded).
 Два встроенных пейволла одновременно не висят: **новый показ вытесняет
 предыдущий** — если вызвать `openWebPaywallEmbedded` повторно, пока первый экран
 ещё открыт, старый показ завершается, и дальше работает только новый.
+
+---
+
+## События воронки (`setFunnelEventListener`)
+
+Страница во встроенном WebView сообщает SDK о прохождении квиза. Подписка —
+одна точка, слушатель получает **имя события** и **данные**; колбэк приходит на
+главный поток, из него можно сразу трогать UI.
+
+```kotlin
+Web2AppSdk.setFunnelEventListener { name, data ->
+    analytics.log(
+        name,
+        mapOf(
+            "screen_id" to data.screenId,
+            "screen_index" to data.screenIndex,
+            "screen_total" to data.screenTotal,
+            "block_id" to data.blockId,
+            "block_type" to data.blockType,
+        ),
+    )
+}
+
+Web2AppSdk.setFunnelEventListener(null) // отписаться
+```
+
+Какие события приходят сегодня:
+
+| Событие | Когда | Заполненные поля |
+|---|---|---|
+| `quiz_start` | воронка открылась | — |
+| `quiz_screen_view` | показан экран | `screenId`, `screenIndex`, `screenTotal` |
+| `quiz_answer` | дан ответ на блоке | `screenId`, `screenIndex`, `screenTotal`, `blockId`, `blockType` |
+| `quiz_email_submit` | отправлен email | — |
+| `quiz_complete` | квиз пройден | — |
+| `paywall_result` | исход пейволла | — |
+| `close` | тап по «Закрыть» на странице | — |
+
+**Эти события не закрывают пейволл.** Показ завершают ровно два случая:
+`paywall_result` со статусом успеха и `close` — их SDK обрабатывает сам и отдаёт
+результат в `onResult` метода `openWebPaywallEmbedded`. Всё остальное, включая
+все `quiz_*`, только уведомляет слушателя, WebView остаётся открытым.
+
+Про поля: PII через мост не ходит — email и сами тексты ответов страница
+вырезает, в `FunnelEventData` приезжают только идентификаторы. Любое поле может
+отсутствовать (тогда `null`) — это норма, а не ошибка. Незнакомое событие SDK
+молча передаёт слушателю и ничего не ломает, так что новые события со стороны
+веба не требуют обновления SDK.
 
 ---
 
