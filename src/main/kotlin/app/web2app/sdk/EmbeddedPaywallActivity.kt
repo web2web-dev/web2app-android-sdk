@@ -25,8 +25,12 @@ import android.widget.TextView
  *
  * Коллбэк отдаётся РОВНО один раз: событие моста либо null (юзер закрыл
  * нативно — крестиком или системным back).
+ *
+ * А-4: показ регистрируется в [EmbeddedPaywallPresentations] — новый показ
+ * вытесняет предыдущий (стопки пейволлов не будет), вытесненный доигрывает
+ * свой обычный путь и отдаёт колбэк из [onDestroy].
  */
-internal class EmbeddedPaywallActivity : Activity() {
+internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation {
     private var finishedWithEvent = false
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -38,6 +42,9 @@ internal class EmbeddedPaywallActivity : Activity() {
             finish()
             return
         }
+
+        // Показ состоится → он и есть активный; предыдущий (если был) вытесняется.
+        EmbeddedPaywallPresentations.setActive(this)
 
         val webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -94,7 +101,18 @@ internal class EmbeddedPaywallActivity : Activity() {
         super.onBackPressed()
     }
 
+    /**
+     * Вытеснение новым показом ([EmbeddedPaywallPresentations]): просто закрываем
+     * окно. Результат отдаст [onDestroy] обычным путём — ровно один раз, гард
+     * [finishedWithEvent] + one-shot [EmbeddedPaywallCallbacks].
+     */
+    override fun dismiss() {
+        finish()
+    }
+
     override fun onDestroy() {
+        // Слабую ссылку чистим сами — по идентичности, чтобы не снести новый показ.
+        EmbeddedPaywallPresentations.clear(this)
         // Активити умерла без события (система убила/back) → отдать null один раз.
         deliver(null)
         super.onDestroy()
