@@ -28,7 +28,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.github.web2web-dev:web2app-android-sdk:0.4.3")
+    implementation("com.github.web2web-dev:web2app-android-sdk:0.5.0")
 }
 ```
 
@@ -89,12 +89,12 @@ Web2AppSdk.entitlement { grant ->
 | `openWebPaywallEmbedded(context, paywallUrl, email) { result -> }` | Встроенный показ (WebView + JS-мост): авто-закрытие на успехе, типизированный `PaywallResult`. |
 | `openWebPaywallEmbeddedById(context, paywallId, email) { result -> }` | Встроенный показ по ID пейволла. |
 | `openQuizEmbedded(context, quizUrl, email) { result -> }` | Встроенный показ КВИЗА (тот же WebView + мост). События прохождения идут в слушатель, колбэк — про закрытие экрана (`QuizResult`). |
-
-Все пять методов показа принимают ещё два необязательных именованных параметра —
-`adaptyProfileId` и `revenuecatProfileId` (см. раздел «Adapty / RevenueCat»).
 | `handleReturnUrl(uri) { grant -> }` | Обработать возвратную ссылку `<схема>://handoff` (кнопка «Закрыть» на success-экране). |
 | `identifyWithDeepLinkValue(code) { result -> }` | Опознать по одноразовому коду — из ссылки в письме после оплаты или из MMP-коллбека (AppsFlyer/Adjust). Возвращает `guid`. |
 | `setFunnelEventListener { name, data -> }` | Слушать события прохождения квиза из встроенного показа. Пейволл они не закрывают — см. раздел ниже. |
+
+Все пять методов показа принимают ещё два необязательных именованных параметра —
+`adaptyProfileId` и `revenuecatProfileId` (см. раздел «Adapty / RevenueCat»).
 
 Восстановление по email — два шага: `requestEmailRecovery(email)` отправляет пользователю
 письмо со ссылкой; когда он по ней перейдёт, приложение получит код из диплинка и передаёт
