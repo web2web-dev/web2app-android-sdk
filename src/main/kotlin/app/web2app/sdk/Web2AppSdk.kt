@@ -11,6 +11,13 @@ import java.util.UUID
  * R1 (чтение права) НЕ тронут — [entitlement] дословно проксирует
  * `GET /public/entitlement?guid=`. R2 = обвязка доставки guid перед R1.
  *
+ * **Поток колбэков (паритет iOS 0.4.1).** Результат ЛЮБОГО метода ниже —
+ * включая `onNeedEmail` и ранние возвраты вроде «нет configure» — приходит на
+ * ГЛАВНЫЙ поток: из колбэка можно сразу трогать UI. Если метод вызван уже на
+ * главном потоке, колбэк исполняется синхронно, без прыжка через очередь
+ * Looper'а; правило одинаковое для всех методов и всех веток одного метода
+ * (см. [MainThread]).
+ *
  * Использование:
  * ```
  * Web2AppSdk.configure(context, projectId = "proj_...", baseUrl = "https://api.example.com")
@@ -39,18 +46,23 @@ object Web2AppSdk {
         onResult: (Result<String>) -> Unit = {},
         onNeedEmail: () -> Unit = {},
     ) {
-        val cfg = config ?: return onResult(Result.failure(IllegalStateException("not configured")))
+        // Обёртка на главный поток РОВНО одна и на входе: ниже по коду (включая
+        // ранние возвраты и колбэк резолвера) зовём только обёрнутые.
+        val deliver = MainThread.wrap(onResult)
+        val deliverNeedEmail = MainThread.wrapNoArgs(onNeedEmail)
 
-        guidStore.load()?.let { return onResult(Result.success(it)) }
+        val cfg = config ?: return deliver(Result.failure(IllegalStateException("not configured")))
+
+        guidStore.load()?.let { return deliver(Result.success(it)) }
 
         InstallReferrerResolver(cfg).readAndResolve(guidStore.context) { result ->
             result.onSuccess { guid ->
                 guidStore.save(guid)
                 AppCallbackProducer(cfg).reportAppInstalled(guid)
-                onResult(Result.success(guid))
+                deliver(Result.success(guid))
             }.onFailure {
                 // Промах referrer → email-fallback (НЕ падаем молча).
-                onNeedEmail()
+                deliverNeedEmail()
             }
         }
     }
@@ -62,8 +74,9 @@ object Web2AppSdk {
      *      identifyWithDeepLinkValue(code) резолвит guid (тот же resolve-путь).
      */
     fun requestEmailRecovery(email: String, onResult: (Result<Unit>) -> Unit) {
-        val cfg = config ?: return onResult(Result.failure(IllegalStateException("not configured")))
-        AttributionResolver(cfg).requestEmailRecovery(email, onResult)
+        val deliver = MainThread.wrap(onResult)
+        val cfg = config ?: return deliver(Result.failure(IllegalStateException("not configured")))
+        AttributionResolver(cfg).requestEmailRecovery(email, deliver)
     }
 
     /**
@@ -71,22 +84,24 @@ object Web2AppSdk {
      * MMP-callback. **[POC-1]** — валидируется на реальном девайсе (доезжает ли deep_link_value).
      */
     fun identifyWithDeepLinkValue(token: String, onResult: (Result<String>) -> Unit) {
-        val cfg = config ?: return onResult(Result.failure(IllegalStateException("not configured")))
+        val deliver = MainThread.wrap(onResult)
+        val cfg = config ?: return deliver(Result.failure(IllegalStateException("not configured")))
         AttributionResolver(cfg).resolveToken(token) { result ->
             result.onSuccess { guid ->
                 guidStore.save(guid)
                 AppCallbackProducer(cfg).reportAppInstalled(guid)
             }
-            onResult(result)
+            deliver(result)
         }
     }
 
     /** Читает право по сохранённому guid — passthrough `GET /public/entitlement?guid=`. */
     fun entitlement(onResult: (EntitlementGrant?) -> Unit) {
+        val deliver = MainThread.wrap(onResult)
         val cfg = config
         val guid = if (::guidStore.isInitialized) guidStore.load() else null
-        if (cfg == null || guid == null) return onResult(null)
-        EntitlementClient(cfg).fetch(guid, onResult)
+        if (cfg == null || guid == null) return deliver(null)
+        EntitlementClient(cfg).fetch(guid, deliver)
     }
 
     /** Текущий guid (client-held ключ). */
@@ -114,8 +129,20 @@ object Web2AppSdk {
         paywallUrl: String,
         email: String? = null,
         onResult: (EntitlementGrant?) -> Unit = {},
+    ) = openWebPaywallInternal(context, paywallUrl, email, MainThread.wrap(onResult))
+
+    /**
+     * Общее тело [openWebPaywall] и [openWebPaywallById]. [deliver] уже обёрнут
+     * вызывающим — здесь НЕ оборачиваем повторно (иначе делегирование `*ById`
+     * дало бы двойную обёртку на одну доставку).
+     */
+    private fun openWebPaywallInternal(
+        context: Context,
+        paywallUrl: String,
+        email: String?,
+        deliver: (EntitlementGrant?) -> Unit,
     ) {
-        val cfg = config ?: return onResult(null)
+        val cfg = config ?: return deliver(null)
 
         // guid-поллинг: берём client-held guid или чеканим новый — grant на вебе ляжет на него.
         val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
@@ -131,7 +158,7 @@ object Web2AppSdk {
             intervalMs = 2_000,
             maxAttempts = 30,
             fetch = { cb -> client.fetch(guid, cb) },
-            completion = onResult,
+            completion = deliver,
         )
     }
 
@@ -154,11 +181,13 @@ object Web2AppSdk {
         url: String,
         onResult: (EntitlementGrant?) -> Unit = {},
     ): Boolean {
+        // Чужой deep-link: колбэк не зовём вовсе — контракт «false и тишина».
         if (!WebPaywallLauncher.isHandoffReturnUrl(url)) return false
+        val deliver = MainThread.wrap(onResult)
         val cfg = config
         val guid = if (::guidStore.isInitialized) guidStore.load() else null
         if (cfg == null || guid == null) {
-            onResult(null)
+            deliver(null)
             return true
         }
         val client = EntitlementClient(cfg)
@@ -166,7 +195,7 @@ object Web2AppSdk {
             intervalMs = 1_000,
             maxAttempts = 10,
             fetch = { cb -> client.fetch(guid, cb) },
-            completion = onResult,
+            completion = deliver,
         )
         return true
     }
@@ -191,9 +220,11 @@ object Web2AppSdk {
         email: String? = null,
         onResult: (EntitlementGrant?) -> Unit = {},
     ) {
+        // Обёртка одна — делегируем УЖЕ обёрнутый колбэк во внутреннее тело.
+        val deliver = MainThread.wrap(onResult)
         resolvePaywallUrl(paywallId) { url ->
-            if (url == null) onResult(null)
-            else openWebPaywall(context, url, email, onResult)
+            if (url == null) deliver(null)
+            else openWebPaywallInternal(context, url, email, deliver)
         }
     }
 
@@ -210,9 +241,20 @@ object Web2AppSdk {
         paywallUrl: String,
         email: String? = null,
         onResult: (PaywallResult) -> Unit,
+    ) = openWebPaywallEmbeddedInternal(context, paywallUrl, email, MainThread.wrap(onResult))
+
+    /**
+     * Общее тело [openWebPaywallEmbedded] и [openWebPaywallEmbeddedById].
+     * [deliver] уже обёрнут вызывающим — повторно НЕ оборачиваем.
+     */
+    private fun openWebPaywallEmbeddedInternal(
+        context: Context,
+        paywallUrl: String,
+        email: String?,
+        deliver: (PaywallResult) -> Unit,
     ) {
         // Без configure пейволл не показать — это НЕ «не оплатил» (паритет iOS .unavailable).
-        val cfg = config ?: return onResult(PaywallResult.Unavailable)
+        val cfg = config ?: return deliver(PaywallResult.Unavailable)
         val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
             ?: UUID.randomUUID().toString()
         if (::guidStore.isInitialized) guidStore.save(guid)
@@ -230,9 +272,9 @@ object Web2AppSdk {
                 fetch = { cb -> client.fetch(guid, cb) },
             ) { grant ->
                 when {
-                    grant != null -> onResult(PaywallResult.Paid(grant))
-                    event == BridgeEvent.PAYMENT_SUCCESS -> onResult(PaywallResult.Pending)
-                    else -> onResult(PaywallResult.NotPaid)
+                    grant != null -> deliver(PaywallResult.Paid(grant))
+                    event == BridgeEvent.PAYMENT_SUCCESS -> deliver(PaywallResult.Pending)
+                    else -> deliver(PaywallResult.NotPaid)
                 }
             }
         }
@@ -250,9 +292,11 @@ object Web2AppSdk {
         email: String? = null,
         onResult: (PaywallResult) -> Unit,
     ) {
+        // Обёртка одна — делегируем УЖЕ обёрнутый колбэк во внутреннее тело.
+        val deliver = MainThread.wrap(onResult)
         resolvePaywallUrl(paywallId) { url ->
-            if (url == null) onResult(PaywallResult.Unavailable)
-            else openWebPaywallEmbedded(context, url, email, onResult)
+            if (url == null) deliver(PaywallResult.Unavailable)
+            else openWebPaywallEmbeddedInternal(context, url, email, deliver)
         }
     }
 
