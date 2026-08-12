@@ -88,6 +88,9 @@ Web2AppSdk.entitlement { grant ->
 | `openWebPaywallById(context, paywallId, email) { grant -> }` | То же по ID пейволла из кабинета — URL резолвится сам. |
 | `openWebPaywallEmbedded(context, paywallUrl, email) { result -> }` | Встроенный показ (WebView + JS-мост): авто-закрытие на успехе, типизированный `PaywallResult`. |
 | `openWebPaywallEmbeddedById(context, paywallId, email) { result -> }` | Встроенный показ по ID пейволла. |
+
+Все четыре метода показа принимают ещё два необязательных именованных параметра —
+`adaptyProfileId` и `revenuecatProfileId` (см. раздел «Adapty / RevenueCat»).
 | `handleReturnUrl(uri) { grant -> }` | Обработать возвратную ссылку `<схема>://handoff` (кнопка «Закрыть» на success-экране). |
 | `identifyWithDeepLinkValue(code) { result -> }` | Опознать по одноразовому коду — из ссылки в письме после оплаты или из MMP-коллбека (AppsFlyer/Adjust). Возвращает `guid`. |
 | `setFunnelEventListener { name, data -> }` | Слушать события прохождения квиза из встроенного показа. Пейволл они не закрывают — см. раздел ниже. |
@@ -179,6 +182,31 @@ null (не-embedded) / `Unavailable` (embedded).
 Два встроенных пейволла одновременно не висят: **новый показ вытесняет
 предыдущий** — если вызвать `openWebPaywallEmbedded` повторно, пока первый экран
 ещё открыт, старый показ завершается, и дальше работает только новый.
+
+---
+
+## Adapty / RevenueCat: передать profile-id
+
+Если подписки у вас на Adapty или RevenueCat, передайте profile-id их SDK при
+открытии веб-страницы — все четыре метода показа принимают необязательные
+`adaptyProfileId` и `revenuecatProfileId`:
+
+```kotlin
+Web2AppSdk.openWebPaywallEmbedded(
+    context,
+    paywallUrl = url,
+    adaptyProfileId = Adapty.getProfileId(),          // или revenuecatProfileId = Purchases.sharedInstance.appUserID
+) { result -> /* ... */ }
+```
+
+Порядок такой: сначала получаете profile-id из SDK подписочной платформы,
+потом открываете веб-страницу. SDK дописывает его в URL
+(`adapty_profile_id` / `revenuecat_profile_id`) — **связывание профиля с нашим
+пользователем делает сама страница на сервере**, дополнительных вызовов не нужно.
+Связка пишется один раз (первая запись побеждает) и переживает редиректы оплаты.
+
+Передавать можно один из двух или оба; не переданные (`null` или пустая строка)
+в URL не попадают вовсе.
 
 ---
 

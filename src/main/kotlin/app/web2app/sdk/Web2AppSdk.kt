@@ -128,6 +128,10 @@ object Web2AppSdk {
      * пейволы не отдают — WEB-395). [email] — опц. prefill (юзер может поправить на вебе).
      * [onResult] — активный [EntitlementGrant] или null, если за окно право не появилось.
      *
+     * Б-3: [adaptyProfileId] / [revenuecatProfileId] — profile-id подписочной платформы,
+     * если она у вас есть. SDK лишь дописывает их в URL страницы; связывание профиля с guid
+     * делает веб-страница сама (отдельную ручку звать не надо). См. [openWebPaywallEmbedded].
+     *
      * ⚠ MVP-1: принимает готовый [paywallUrl]. Серверный резолв projectId→дефолт-пейвол-URL —
      * отдельный follow-up.
      */
@@ -135,8 +139,17 @@ object Web2AppSdk {
         context: Context,
         paywallUrl: String,
         email: String? = null,
+        adaptyProfileId: String? = null,
+        revenuecatProfileId: String? = null,
         onResult: (EntitlementGrant?) -> Unit = {},
-    ) = openWebPaywallInternal(context, paywallUrl, email, MainThread.wrap(onResult))
+    ) = openWebPaywallInternal(
+        context,
+        paywallUrl,
+        email,
+        adaptyProfileId,
+        revenuecatProfileId,
+        MainThread.wrap(onResult),
+    )
 
     /**
      * Общее тело [openWebPaywall] и [openWebPaywallById]. [deliver] уже обёрнут
@@ -147,6 +160,8 @@ object Web2AppSdk {
         context: Context,
         paywallUrl: String,
         email: String?,
+        adaptyProfileId: String?,
+        revenuecatProfileId: String?,
         deliver: (EntitlementGrant?) -> Unit,
     ) {
         val cfg = config ?: return deliver(null)
@@ -156,7 +171,8 @@ object Web2AppSdk {
             ?: UUID.randomUUID().toString()
         if (::guidStore.isInitialized) guidStore.save(guid)
 
-        val url = WebPaywallLauncher.appOriginUrl(paywallUrl, email, guid)
+        val url = WebPaywallLauncher
+            .appOriginUrl(paywallUrl, email, guid, adaptyProfileId, revenuecatProfileId)
         CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
 
         // Поллим право по нашему guid: 30 попыток × 2с ≈ 60с (покрывает Stripe webhook→grant).
@@ -225,13 +241,22 @@ object Web2AppSdk {
         context: Context,
         paywallId: String,
         email: String? = null,
+        adaptyProfileId: String? = null,
+        revenuecatProfileId: String? = null,
         onResult: (EntitlementGrant?) -> Unit = {},
     ) {
         // Обёртка одна — делегируем УЖЕ обёрнутый колбэк во внутреннее тело.
         val deliver = MainThread.wrap(onResult)
         resolvePaywallUrl(paywallId) { url ->
             if (url == null) deliver(null)
-            else openWebPaywallInternal(context, url, email, deliver)
+            else openWebPaywallInternal(
+                context,
+                url,
+                email,
+                adaptyProfileId,
+                revenuecatProfileId,
+                deliver,
+            )
         }
     }
 
@@ -242,13 +267,26 @@ object Web2AppSdk {
      * «Закрыть» тоже идёт мостом — URL-схема не нужна. Результат типизирован:
      * [PaywallResult.Paid] / [PaywallResult.NotPaid] / [PaywallResult.Pending];
      * [PaywallResult.Unavailable] — если пейволл вообще не показали (нет configure).
+     *
+     * Б-3: [adaptyProfileId] / [revenuecatProfileId] — profile-id вашей подписочной платформы
+     * (берётся из её SDK ДО показа страницы). SDK дописывает их в URL страницы; связывание
+     * профиля с guid делает сама страница на сервере — звать ничего не нужно.
      */
     fun openWebPaywallEmbedded(
         context: Context,
         paywallUrl: String,
         email: String? = null,
+        adaptyProfileId: String? = null,
+        revenuecatProfileId: String? = null,
         onResult: (PaywallResult) -> Unit,
-    ) = openWebPaywallEmbeddedInternal(context, paywallUrl, email, MainThread.wrap(onResult))
+    ) = openWebPaywallEmbeddedInternal(
+        context,
+        paywallUrl,
+        email,
+        adaptyProfileId,
+        revenuecatProfileId,
+        MainThread.wrap(onResult),
+    )
 
     /**
      * Общее тело [openWebPaywallEmbedded] и [openWebPaywallEmbeddedById].
@@ -258,6 +296,8 @@ object Web2AppSdk {
         context: Context,
         paywallUrl: String,
         email: String?,
+        adaptyProfileId: String?,
+        revenuecatProfileId: String?,
         deliver: (PaywallResult) -> Unit,
     ) {
         // Без configure пейволл не показать — это НЕ «не оплатил» (паритет iOS .unavailable).
@@ -266,7 +306,8 @@ object Web2AppSdk {
             ?: UUID.randomUUID().toString()
         if (::guidStore.isInitialized) guidStore.save(guid)
 
-        val url = WebPaywallLauncher.appOriginUrl(paywallUrl, email, guid)
+        val url = WebPaywallLauncher
+            .appOriginUrl(paywallUrl, email, guid, adaptyProfileId, revenuecatProfileId)
         val client = EntitlementClient(cfg)
         val callbackId = UUID.randomUUID().toString()
         EmbeddedPaywallCallbacks.register(callbackId) { event ->
@@ -297,13 +338,22 @@ object Web2AppSdk {
         context: Context,
         paywallId: String,
         email: String? = null,
+        adaptyProfileId: String? = null,
+        revenuecatProfileId: String? = null,
         onResult: (PaywallResult) -> Unit,
     ) {
         // Обёртка одна — делегируем УЖЕ обёрнутый колбэк во внутреннее тело.
         val deliver = MainThread.wrap(onResult)
         resolvePaywallUrl(paywallId) { url ->
             if (url == null) deliver(PaywallResult.Unavailable)
-            else openWebPaywallEmbeddedInternal(context, url, email, deliver)
+            else openWebPaywallEmbeddedInternal(
+                context,
+                url,
+                email,
+                adaptyProfileId,
+                revenuecatProfileId,
+                deliver,
+            )
         }
     }
 

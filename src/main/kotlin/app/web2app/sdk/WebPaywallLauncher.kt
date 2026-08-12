@@ -17,15 +17,40 @@ import java.net.URLEncoder
  */
 internal object WebPaywallLauncher {
     /**
-     * Чистая сборка app-origin URL: добавляет `origin=app` + опц. `email` + `guid`,
+     * Б-3 — имена query-параметров profile-id подписочных платформ. Это КОНТРАКТ с вебом:
+     * ровно эти два имени читает `frontend/src/utils/providerProfileLink.ts`, который сам
+     * связывает профиль с guid на сервере. Переименование = тихий разрыв связывания.
+     */
+    private const val PARAM_ADAPTY_PROFILE_ID = "adapty_profile_id"
+    private const val PARAM_REVENUECAT_PROFILE_ID = "revenuecat_profile_id"
+
+    /**
+     * Чистая сборка app-origin URL: добавляет `origin=app` + опц. `email` + `guid`
+     * + опц. profile-id Adapty/RevenueCat ([adaptyProfileId], [revenuecatProfileId]),
      * СОХРАНЯЯ существующий query исходного URL. Значения URL-кодируются. Не использует
      * android.net.Uri — чтобы быть юнит-тестируемой на чистой JVM.
+     *
+     * Единственная точка сборки URL: profile-id добавляются ЗДЕСЬ, а не конкатенацией в
+     * вызывающем коде — иначе теряется и сохранение исходного query, и кодирование значений.
+     * Пустая строка = «не передали»: `adapty_profile_id=` слать нельзя.
      */
-    fun appOriginUrl(paywallUrl: String, email: String?, guid: String): String {
+    fun appOriginUrl(
+        paywallUrl: String,
+        email: String?,
+        guid: String,
+        adaptyProfileId: String? = null,
+        revenuecatProfileId: String? = null,
+    ): String {
         val params = buildList {
             add("origin" to "app")
             if (!email.isNullOrEmpty()) add("email" to email)
             add("guid" to guid)
+            if (!adaptyProfileId.isNullOrEmpty()) {
+                add(PARAM_ADAPTY_PROFILE_ID to adaptyProfileId)
+            }
+            if (!revenuecatProfileId.isNullOrEmpty()) {
+                add(PARAM_REVENUECAT_PROFILE_ID to revenuecatProfileId)
+            }
         }
         val query = params.joinToString("&") { (k, v) ->
             "$k=${URLEncoder.encode(v, "UTF-8")}"

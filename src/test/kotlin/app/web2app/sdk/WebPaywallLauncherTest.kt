@@ -43,6 +43,104 @@ class WebPaywallLauncherTest {
         assertTrue(url.contains("pw1?utm=x&"))
     }
 
+    /**
+     * Б-3 — profile-id подписочных платформ (Adapty/RevenueCat) в URL веб-страницы.
+     * Имена параметров читает фронт (`providerProfileLink.ts`) — они часть контракта,
+     * поэтому проверяются дословно.
+     */
+    @Test
+    fun appOriginUrlIncludesBothProviderProfileIds() {
+        val url = WebPaywallLauncher.appOriginUrl(
+            paywallUrl = "https://client.example.com/paywall/pw1",
+            email = null,
+            guid = "g-1",
+            adaptyProfileId = "adapty-1",
+            revenuecatProfileId = "rc-1",
+        )
+        assertTrue(url.contains("adapty_profile_id=adapty-1"))
+        assertTrue(url.contains("revenuecat_profile_id=rc-1"))
+        // старое не сломали
+        assertTrue(url.contains("origin=app"))
+        assertTrue(url.contains("guid=g-1"))
+    }
+
+    @Test
+    fun appOriginUrlOmitsAbsentProviderProfileId() {
+        val onlyAdapty = WebPaywallLauncher.appOriginUrl(
+            paywallUrl = "https://client.example.com/paywall/pw1",
+            email = null,
+            guid = "g-1",
+            adaptyProfileId = "adapty-1",
+        )
+        assertTrue(onlyAdapty.contains("adapty_profile_id=adapty-1"))
+        assertFalse(onlyAdapty.contains("revenuecat_profile_id"))
+
+        val onlyRevenueCat = WebPaywallLauncher.appOriginUrl(
+            paywallUrl = "https://client.example.com/paywall/pw1",
+            email = null,
+            guid = "g-1",
+            revenuecatProfileId = "rc-1",
+        )
+        assertTrue(onlyRevenueCat.contains("revenuecat_profile_id=rc-1"))
+        assertFalse(onlyRevenueCat.contains("adapty_profile_id"))
+    }
+
+    /** Пустая строка = «не передали»: `adapty_profile_id=` слать нельзя. */
+    @Test
+    fun appOriginUrlTreatsBlankProviderProfileIdAsAbsent() {
+        val url = WebPaywallLauncher.appOriginUrl(
+            paywallUrl = "https://client.example.com/paywall/pw1",
+            email = null,
+            guid = "g-1",
+            adaptyProfileId = "",
+            revenuecatProfileId = "",
+        )
+        assertFalse(url.contains("adapty_profile_id"))
+        assertFalse(url.contains("revenuecat_profile_id"))
+    }
+
+    /** Существующий query исходного URL сохранён, разделители корректны. */
+    @Test
+    fun appOriginUrlPreservesExistingQueryWithProviderProfileIds() {
+        val withQuery = WebPaywallLauncher.appOriginUrl(
+            paywallUrl = "https://client.example.com/paywall/pw1?utm=x",
+            email = null,
+            guid = "g-1",
+            adaptyProfileId = "adapty-1",
+            revenuecatProfileId = "rc-1",
+        )
+        assertTrue(withQuery.contains("utm=x"))
+        assertTrue(withQuery.contains("pw1?utm=x&"))
+        assertEquals(1, withQuery.count { it == '?' })
+        assertTrue(withQuery.contains("&adapty_profile_id=adapty-1"))
+        assertTrue(withQuery.contains("&revenuecat_profile_id=rc-1"))
+
+        val withoutQuery = WebPaywallLauncher.appOriginUrl(
+            paywallUrl = "https://client.example.com/paywall/pw1",
+            email = null,
+            guid = "g-1",
+            adaptyProfileId = "adapty-1",
+        )
+        assertTrue(withoutQuery.startsWith("https://client.example.com/paywall/pw1?"))
+        assertEquals(1, withoutQuery.count { it == '?' })
+    }
+
+    /** Значения кодируются так же, как остальные (иначе `+`/`&` в id порвут query). */
+    @Test
+    fun appOriginUrlEncodesProviderProfileIds() {
+        val url = WebPaywallLauncher.appOriginUrl(
+            paywallUrl = "https://client.example.com/paywall/pw1",
+            email = null,
+            guid = "g-1",
+            adaptyProfileId = "a b&c",
+            revenuecatProfileId = "\$RCAnonymousID:7f/3",
+        )
+        assertTrue(url.contains("adapty_profile_id=a+b%26c"))
+        assertTrue(url.contains("revenuecat_profile_id=%24RCAnonymousID%3A7f%2F3"))
+        // разделителей ровно столько, сколько параметров: чужой & в значение не утёк
+        assertEquals(3, url.count { it == '&' })
+    }
+
     @Test
     fun pollStopsOnActiveGrant() {
         val latch = CountDownLatch(1)
