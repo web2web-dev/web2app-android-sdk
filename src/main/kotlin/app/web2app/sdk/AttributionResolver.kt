@@ -5,7 +5,7 @@ import java.net.URLEncoder
 
 /**
  * Резолв guid из carrier-token или email. Стабильные backend-контракты (POC-независимо):
- *  - token → `GET /public/handoff/resolve?code=<token>` → { guid } (WEB-433).
+ *  - token → `GET /public/handoff/resolve?code=<token>` → `{"success":true,"data":{"guid":…}}` (WEB-433).
  *  - email → verified-resolve (WEB-431, In Review — контракт финализируется при мёрдже).
  */
 internal class AttributionResolver(private val config: Web2AppConfig) {
@@ -34,8 +34,31 @@ internal class AttributionResolver(private val config: Web2AppConfig) {
     }
 
     private fun parseGuid(body: String?): Result<String> {
-        val guid = body?.let { runCatching { JSONObject(it).optString("guid") }.getOrNull() }
-        return if (!guid.isNullOrEmpty()) Result.success(guid)
+        val guid = parseGuidResponse(body)
+        return if (guid != null) Result.success(guid)
         else Result.failure(IllegalStateException("resolve failed"))
+    }
+
+    companion object {
+        /** `"guid":"..."` с учётом экранирования — как в [WebPaywallLauncher.parsePaywallUrlResponse]. */
+        private val GUID_FIELD = Regex("\"guid\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+
+        /**
+         * Парсинг ответа `GET /public/handoff/resolve?code=<token>` → guid.
+         *
+         * Живой прод отдаёт обёртку `{"success":true,"data":{"guid":"X","projectId":"Y"}}`;
+         * плоское тело `{"guid":"X"}` поддержано для других/старых окружений. Тело ошибки
+         * (унифицированный 404 `{"message":...,"statusCode":404}`), мусор, пустая строка и null → null,
+         * т.е. наверх уходит `Result.failure`. Узкий regex-парс вместо org.json — тот в
+         * JVM-юнитах Android заглушка и юнит-тестируемым парсер на нём не сделать.
+         */
+        fun parseGuidResponse(body: String?): String? {
+            if (body == null) return null
+            val raw = GUID_FIELD.find(body)?.groupValues?.get(1) ?: return null
+            val guid = raw
+                .replace("\\/", "/")
+                .replace("\\\"", "\"")
+            return guid.ifEmpty { null }
+        }
     }
 }
