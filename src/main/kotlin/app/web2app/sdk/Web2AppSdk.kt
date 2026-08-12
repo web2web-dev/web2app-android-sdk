@@ -312,12 +312,30 @@ object Web2AppSdk {
     /**
      * DEBUG-only (для симулятор/эмулятор/девайс-теста без реальной атрибуции): инъекция guid.
      * ⚠ Вызывать ТОЛЬКО под `if (BuildConfig.DEBUG)` — в проде не использовать.
+     *
+     * В iOS-эталоне такие методы обрезаются `#if DEBUG` и в release-сборку не попадают.
+     * В Android библиотека не видит `BuildConfig.DEBUG` приложения-хоста, поэтому аналог
+     * невозможен — вместо обрезки предупреждение компилятора.
      */
+    @Deprecated(
+        message = "Отладочный метод, не предназначен для production-кода: подменяет guid в " +
+            "обход атрибуции. В release-сборку он попадает (Android-библиотека не видит " +
+            "BuildConfig.DEBUG приложения) — оборачивайте вызов в if (BuildConfig.DEBUG) " +
+            "или убирайте перед релизом.",
+        level = DeprecationLevel.WARNING,
+    )
     fun debugSetGuid(guid: String) {
         if (::guidStore.isInitialized) guidStore.save(guid)
     }
 
-    /** DEBUG-only: сброс сохранённого guid. */
+    /** DEBUG-only: сброс сохранённого guid. См. оговорку у [debugSetGuid]. */
+    @Deprecated(
+        message = "Отладочный метод, не предназначен для production-кода: стирает сохранённый " +
+            "guid. В release-сборку он попадает (Android-библиотека не видит BuildConfig.DEBUG " +
+            "приложения) — оборачивайте вызов в if (BuildConfig.DEBUG) или убирайте перед " +
+            "релизом.",
+        level = DeprecationLevel.WARNING,
+    )
     fun debugClear() {
         if (::guidStore.isInitialized) guidStore.clear()
     }
