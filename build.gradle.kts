@@ -17,6 +17,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    // JVM-юниты: заглушки android.jar отдают дефолты вместо RuntimeException("Stub!") —
+    // нужно, чтобы собрать фиктивный Context и дотянуться до ранних гардов публичных
+    // методов (сам Context в этих ветках не используется).
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
     // maven-publish: единственный release-вариант + sources для потребителей (JitPack).
     publishing {
         singleVariant("release") {

@@ -202,7 +202,8 @@ object Web2AppSdk {
      * 0.4.0): full-screen WebView + JS-мост `web2appBridge`. На успех оплаты
      * пейволл закрывается АВТОМАТИЧЕСКИ (страница шлёт событие мосту), кнопка
      * «Закрыть» тоже идёт мостом — URL-схема не нужна. Результат типизирован:
-     * [PaywallResult.Paid] / [PaywallResult.NotPaid] / [PaywallResult.Pending].
+     * [PaywallResult.Paid] / [PaywallResult.NotPaid] / [PaywallResult.Pending];
+     * [PaywallResult.Unavailable] — если пейволл вообще не показали (нет configure).
      */
     fun openWebPaywallEmbedded(
         context: Context,
@@ -210,7 +211,8 @@ object Web2AppSdk {
         email: String? = null,
         onResult: (PaywallResult) -> Unit,
     ) {
-        val cfg = config ?: return onResult(PaywallResult.NotPaid)
+        // Без configure пейволл не показать — это НЕ «не оплатил» (паритет iOS .unavailable).
+        val cfg = config ?: return onResult(PaywallResult.Unavailable)
         val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
             ?: UUID.randomUUID().toString()
         if (::guidStore.isInitialized) guidStore.save(guid)
@@ -219,10 +221,9 @@ object Web2AppSdk {
         val client = EntitlementClient(cfg)
         val callbackId = UUID.randomUUID().toString()
         EmbeddedPaywallCallbacks.register(callbackId) { event ->
-            // Успех с моста → грант уже записан (ранний грант на бэке) —
-            // короткий поллинг добирает его; закрытие без успеха → быстрый
-            // одиночный чек (вдруг оплатил, но событие не дошло).
-            val attempts = if (event == BridgeEvent.PAYMENT_SUCCESS) 10 else 2
+            // Окно поллинга одинаковое для всех исходов, включая нативное закрытие
+            // (event == null): вебхук Stripe доезжает секундами позже закрытия окна.
+            val attempts = WebPaywallLauncher.embeddedPollAttempts(event)
             WebPaywallLauncher.pollForActiveGrant(
                 intervalMs = 1_000,
                 maxAttempts = attempts,
@@ -238,7 +239,11 @@ object Web2AppSdk {
         EmbeddedPaywallActivity.start(context, url, callbackId)
     }
 
-    /** Встроенный показ по paywallId — резолв той же публичной ручкой. */
+    /**
+     * Встроенный показ по paywallId — резолв той же публичной ручкой.
+     * Не зарезолвился URL (не опубликован / нет домена / 404) → пейволл не показали:
+     * [PaywallResult.Unavailable], а не [PaywallResult.NotPaid].
+     */
     fun openWebPaywallEmbeddedById(
         context: Context,
         paywallId: String,
@@ -246,7 +251,7 @@ object Web2AppSdk {
         onResult: (PaywallResult) -> Unit,
     ) {
         resolvePaywallUrl(paywallId) { url ->
-            if (url == null) onResult(PaywallResult.NotPaid)
+            if (url == null) onResult(PaywallResult.Unavailable)
             else openWebPaywallEmbedded(context, url, email, onResult)
         }
     }

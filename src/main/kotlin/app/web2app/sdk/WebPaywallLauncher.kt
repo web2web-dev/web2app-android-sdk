@@ -65,6 +65,21 @@ internal object WebPaywallLauncher {
         return if (raw.startsWith("http://") || raw.startsWith("https://")) raw else null
     }
 
+    /** Окно поллинга после закрытия встроенного пейволла: 10 попыток × 1с ≈ 10с. */
+    private const val EMBEDDED_POLL_ATTEMPTS = 10
+
+    /**
+     * Сколько попыток поллинга давать после закрытия ВСТРОЕННОГО пейволла.
+     * Вынесено из [Web2AppSdk.openWebPaywallEmbedded] отдельной чистой функцией —
+     * решение проверяемо на чистой JVM (сам показ требует Android-рантайма).
+     *
+     * Паритет iOS 0.4.1: окно ОДИНАКОВОЕ для всех исходов, включая нативное
+     * закрытие ([event] == null — крестик/системный «назад»). Раньше не-успешные
+     * ветки получали 2 попытки, и юзер с медленным вебхуком Stripe (грант доезжает
+     * через несколько секунд после закрытия окна) получал мгновенный «не оплатил».
+     */
+    fun embeddedPollAttempts(event: BridgeEvent?): Int = EMBEDDED_POLL_ATTEMPTS
+
     /**
      * Поллит [fetch] каждые [intervalMs] мс до [maxAttempts] попыток. Останавливается и отдаёт
      * грант, как только он active; отдаёт null, если active-грант не появился в бюджете попыток.

@@ -156,12 +156,18 @@ Web2AppSdk.openWebPaywallEmbedded(context, paywallUrl = url) { result ->
         is PaywallResult.Paid -> unlockPremium(result.grant)
         PaywallResult.Pending -> showProcessing() // перепроверьте entitlement позже
         PaywallResult.NotPaid -> keepFreeTier()
+        PaywallResult.Unavailable -> showError() // пейволл не показали
     }
 }
 ```
 
+`Unavailable` ≠ `NotPaid`: первый означает, что экран вообще не открылся (SDK не
+сконфигурирован или URL пейволла не зарезолвился), второй — что пейволл показали,
+но оплату не подтвердили.
+
 Открытие по ID (`openWebPaywallById` / `openWebPaywallEmbeddedById`): пейволл
-должен быть опубликован и привязан к домену — иначе колбэк получит null/NotPaid.
+должен быть опубликован и привязан к домену — иначе колбэк получит
+null (не-embedded) / `Unavailable` (embedded).
 
 ---
 

@@ -17,4 +17,11 @@ sealed class PaywallResult {
      * Доступ может появиться позже — перепроверьте `Web2AppSdk.entitlement`.
      */
     object Pending : PaywallResult()
+
+    /**
+     * Пейволл НЕ был показан (паритет iOS `.unavailable`): SDK не сконфигурирован
+     * или URL пейволла не зарезолвился. Отличается от [NotPaid] — там экран
+     * показали, но оплату не подтвердили.
+     */
+    object Unavailable : PaywallResult()
 }
