@@ -88,8 +88,9 @@ Web2AppSdk.entitlement { grant ->
 | `openWebPaywallById(context, paywallId, email) { grant -> }` | То же по ID пейволла из кабинета — URL резолвится сам. |
 | `openWebPaywallEmbedded(context, paywallUrl, email) { result -> }` | Встроенный показ (WebView + JS-мост): авто-закрытие на успехе, типизированный `PaywallResult`. |
 | `openWebPaywallEmbeddedById(context, paywallId, email) { result -> }` | Встроенный показ по ID пейволла. |
+| `openQuizEmbedded(context, quizUrl, email) { result -> }` | Встроенный показ КВИЗА (тот же WebView + мост). События прохождения идут в слушатель, колбэк — про закрытие экрана (`QuizResult`). |
 
-Все четыре метода показа принимают ещё два необязательных именованных параметра —
+Все пять методов показа принимают ещё два необязательных именованных параметра —
 `adaptyProfileId` и `revenuecatProfileId` (см. раздел «Adapty / RevenueCat»).
 | `handleReturnUrl(uri) { grant -> }` | Обработать возвратную ссылку `<схема>://handoff` (кнопка «Закрыть» на success-экране). |
 | `identifyWithDeepLinkValue(code) { result -> }` | Опознать по одноразовому коду — из ссылки в письме после оплаты или из MMP-коллбека (AppsFlyer/Adjust). Возвращает `guid`. |
@@ -185,10 +186,56 @@ null (не-embedded) / `Unavailable` (embedded).
 
 ---
 
+## Встроенный квиз (`openQuizEmbedded`)
+
+Квиз открывается тем же встроенным WebView, что и пейволл, — отдельной настройки
+не требуется:
+
+```kotlin
+Web2AppSdk.setFunnelEventListener { name, data -> analytics.log(name) }
+
+Web2AppSdk.openQuizEmbedded(context, quizUrl = "https://client.example.com/q/quiz-1") { result ->
+    when (result) {
+        is QuizResult.Closed -> when (result.reason) {
+            QuizCloseReason.PAID -> Web2AppSdk.entitlement { grant ->
+                if (grant?.isActive == true) unlockPremium()   // оплата прошла в том же окне
+            }
+            QuizCloseReason.PAGE -> goBackToApp()               // страница попросила закрыть
+            QuizCloseReason.USER -> goBackToApp()               // крестик или системный «назад»
+        }
+        QuizResult.Unavailable -> showError()                   // квиз не показали: нет configure
+    }
+}
+```
+
+Что важно знать:
+
+- **Результат другой, чем у пейволла.** У квиза нет оплаты, поэтому метод не
+  возвращает `PaywallResult` и ничего не поллит. Наблюдаемое — поток событий
+  прохождения (`quiz_start`, `quiz_screen_view`, `quiz_answer`,
+  `quiz_email_submit`, `quiz_complete`), он идёт в `setFunnelEventListener`
+  (см. раздел «События воронки»), — плюс факт закрытия экрана в колбэке.
+- **`quiz_complete` экран НЕ закрывает.** После квиза страница часто сама ведёт
+  на пейволл внутри того же WebView — закрытие на «квиз пройден» оборвало бы
+  воронку перед оплатой. Показ завершают те же два события, что и у пейволла
+  (успех оплаты и «Закрыть»), плюс закрытие юзером; какое именно — видно в
+  `QuizResult.Closed.reason`.
+- **URL берётся готовый.** Резолва «URL квиза по ID» на бэкенде нет (ручка
+  резолва существует только для пейволлов), поэтому `openQuizById` в SDK
+  отсутствует — передавайте опубликованный URL квиза.
+- **guid уезжает в URL так же, как для пейволла** (`origin=app&guid=...`) — веб
+  связывает прохождение квиза с тем же пользователем, что и последующую оплату.
+  Без `configure` guid некуда сохранить, поэтому экран не показывается:
+  `QuizResult.Unavailable`.
+- Показ один на SDK: открытый квиз вытесняется новым показом (квиза или
+  пейволла) — так же, как встроенные пейволлы вытесняют друг друга.
+
+---
+
 ## Adapty / RevenueCat: передать profile-id
 
 Если подписки у вас на Adapty или RevenueCat, передайте profile-id их SDK при
-открытии веб-страницы — все четыре метода показа принимают необязательные
+открытии веб-страницы — все пять методов показа принимают необязательные
 `adaptyProfileId` и `revenuecatProfileId`:
 
 ```kotlin
@@ -249,6 +296,9 @@ Web2AppSdk.setFunnelEventListener(null) // отписаться
 `paywall_result` со статусом успеха и `close` — их SDK обрабатывает сам и отдаёт
 результат в `onResult` метода `openWebPaywallEmbedded`. Всё остальное, включая
 все `quiz_*`, только уведомляет слушателя, WebView остаётся открытым.
+
+То же правило действует и для встроенного квиза (`openQuizEmbedded`): `quiz_complete`
+экран не закрывает — см. раздел «Встроенный квиз».
 
 Про поля: PII через мост не ходит — email и сами тексты ответов страница
 вырезает, в `FunnelEventData` приезжают только идентификаторы. Любое поле может

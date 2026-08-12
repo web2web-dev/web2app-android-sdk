@@ -358,6 +358,70 @@ object Web2AppSdk {
     }
 
     /**
+     * Б-2 — открытие КВИЗА встроенным WebView (тот же показ, что у пейволла:
+     * full-screen WebView + JS-мост `web2appBridge`).
+     *
+     * **Результат другой, чем у пейволла.** Оплаты у квиза нет, поэтому метод не
+     * возвращает [PaywallResult] и не поллит право: наблюдаемое — поток событий
+     * прохождения (`quiz_start`, `quiz_screen_view`, `quiz_answer`,
+     * `quiz_email_submit`, `quiz_complete`), он идёт в
+     * [setFunnelEventListener], — плюс факт закрытия экрана в [onClose].
+     *
+     * ⚠ `quiz_complete` экран НЕ закрывает: после квиза страница часто сама ведёт
+     * на пейволл в том же WebView. Закрывают показ те же два терминальных события,
+     * что и у пейволла (`paywall_result:success` и `close`), плюс нативное
+     * закрытие юзером — какое из трёх сработало, видно в
+     * [QuizResult.Closed.reason].
+     *
+     * [quizUrl] — ГОТОВЫЙ URL опубликованного квиза. Резолва «URL квиза по ID» на
+     * бэкенде нет (`/public/paywall-url/:paywallId` существует только для
+     * пейволлов), поэтому `openQuizById` в SDK намеренно отсутствует.
+     * [email] — опц. prefill. [adaptyProfileId] / [revenuecatProfileId] — profile-id
+     * подписочной платформы: SDK дописывает их в URL, связывание с guid делает
+     * сама страница (см. [openWebPaywallEmbedded]).
+     *
+     * guid кладётся в URL так же, как для пейволла — веб связывает прохождение
+     * квиза с тем же пользователем. Без [configure] guid некуда персистить, поэтому
+     * экран не показывается: [QuizResult.Unavailable].
+     *
+     * [onClose] приходит на ГЛАВНЫЙ поток РОВНО один раз (общее правило SDK,
+     * см. [MainThread]).
+     *
+     * ```
+     * Web2AppSdk.setFunnelEventListener { name, data -> analytics.log(name) }
+     * Web2AppSdk.openQuizEmbedded(context, "https://client.example.com/q/quiz-1") { result ->
+     *     if (result is QuizResult.Closed && result.reason == QuizCloseReason.PAID) {
+     *         Web2AppSdk.entitlement { grant -> if (grant?.isActive == true) unlock() }
+     *     }
+     * }
+     * ```
+     */
+    fun openQuizEmbedded(
+        context: Context,
+        quizUrl: String,
+        email: String? = null,
+        adaptyProfileId: String? = null,
+        revenuecatProfileId: String? = null,
+        onClose: (QuizResult) -> Unit = {},
+    ) {
+        // Обёртка на главный поток ровно одна — на входе публичного метода.
+        val deliver = MainThread.wrap(onClose)
+        // Без configure guid не сохранить: веб связал бы прохождение с ключом,
+        // который прилка тут же потеряет. Экран не показываем — это НЕ «закрыли».
+        if (config == null) return deliver(QuizResult.Unavailable)
+
+        val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
+            ?: UUID.randomUUID().toString()
+        if (::guidStore.isInitialized) guidStore.save(guid)
+
+        val url = QuizPresentation
+            .quizUrl(quizUrl, email, guid, adaptyProfileId, revenuecatProfileId)
+        val callbackId = UUID.randomUUID().toString()
+        QuizPresentation.registerCloseCallback(callbackId, deliver)
+        EmbeddedPaywallActivity.start(context, url, callbackId)
+    }
+
+    /**
      * Б-1 — слушатель событий воронки из встроенного показа (WebView-мост).
      *
      * Страница шлёт события прохождения квиза (`quiz_start`, `quiz_screen_view`,
