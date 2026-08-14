@@ -29,6 +29,9 @@ object Web2AppSdk {
     private var config: Web2AppConfig? = null
     private lateinit var guidStore: GuidStore
 
+    /** WEB-1384: метка первой неудачной попытки отпечатка (окно 2 часа). */
+    private var fingerprintGate: FingerprintAttemptGate? = null
+
     /**
      * Слушатель событий воронки ([setFunnelEventListener]). `@Volatile` —
      * пишется с потока интегратора, читается с потока JavascriptInterface.
@@ -41,6 +44,8 @@ object Web2AppSdk {
         val cfg = Web2AppConfig(projectId, baseUrl.trimEnd('/'))
         config = cfg
         guidStore = GuidStore(context.applicationContext)
+        // WEB-1384: окно попыток отпечатка (2ч с первой неудачи).
+        fingerprintGate = FingerprintAttemptGate(context.applicationContext)
         SdkLogger.attach(cfg, context.applicationContext)
         // Уже опознанный guid — сразу в контекст журнала (best-effort: сбой
         // хранилища не имеет права уронить configure, guid догонит на identify).
@@ -93,6 +98,23 @@ object Web2AppSdk {
                 // WEB-1213: промах referrer → СНАЧАЛА опознание по отпечатку
                 // устройства; любой промах отпечатка → прежний email-fallback
                 // (НЕ падаем молча, поведение не хуже старого).
+                // WEB-1384: попытки ограничены окном 2 часа с ПЕРВОЙ неудачи —
+                // ровно столько живёт слепок на сервере; дальше в сеть не
+                // ходим никогда (ответ известен, лишней работы не делаем).
+                val firstFailedAt =
+                    runCatching { fingerprintGate?.firstFailedAtMillis() }.getOrNull()
+                if (!FingerprintResolver.isWithinAttemptWindow(
+                        firstFailedAt,
+                        System.currentTimeMillis(),
+                    )
+                ) {
+                    SdkLogger.log(
+                        "identify.fingerprint_window_expired",
+                        "окно попыток отпечатка истекло — сразу email-экран",
+                    )
+                    deliverNeedEmail()
+                    return@onFailure
+                }
                 SdkLogger.log("identify.fingerprint_attempt")
                 FingerprintResolver(cfg).resolve { match ->
                     if (match != null) {
@@ -105,6 +127,7 @@ object Web2AppSdk {
                         AppCallbackProducer(cfg).reportAppInstalled(match.guid)
                         deliver(Result.success(match.guid))
                     } else {
+                        runCatching { fingerprintGate?.markFailure() }
                         SdkLogger.log(
                             "identify.needs_email_fallback",
                             "ни referrer-токена, ни совпадения отпечатка — нужен email-экран",

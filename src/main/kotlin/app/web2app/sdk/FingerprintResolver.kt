@@ -78,6 +78,22 @@ internal class FingerprintResolver(private val config: Web2AppConfig) {
     }
 
     companion object {
+        /**
+         * Окно попыток (WEB-1384): слепок на сервере живёт максимум 2 часа
+         * (точный ярус) — попытки позже математически бесполезны. Зеркало
+         * серверного TIER1_WINDOW_MS: меняется только вместе с ним.
+         */
+        const val ATTEMPT_WINDOW_MS: Long = 2L * 60 * 60 * 1000
+
+        /**
+         * Чистая проверка окна: нет метки первой неудачи → пробовать можно;
+         * внутри окна → можно; окно истекло → в сеть не ходить вовсе.
+         */
+        fun isWithinAttemptWindow(firstFailedAtMillis: Long?, nowMillis: Long): Boolean {
+            if (firstFailedAtMillis == null) return true
+            return nowMillis - firstFailedAtMillis <= ATTEMPT_WINDOW_MS
+        }
+
         /** `"guid":"..."` с учётом экранирования — как в [AttributionResolver]. */
         private val GUID_FIELD = Regex("\"guid\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
         private val MATCH_METHOD_FIELD =

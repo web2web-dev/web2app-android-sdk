@@ -169,4 +169,32 @@ class FingerprintResolverTest {
         val body = FingerprintResolver.requestBody("p", signals)
         assertTrue(body.contains(""""deviceModel":"Weird \"Model\""""))
     }
+
+    // ── WEB-1384: окно попыток (2 часа с первой неудачи) ────────────────────
+
+    @Test
+    fun windowAllowsWhenNoFailureRecorded() {
+        assertTrue(FingerprintResolver.isWithinAttemptWindow(null, nowMillis = 1_000_000L))
+    }
+
+    @Test
+    fun windowAllowsInsideTwoHours() {
+        val first = 1_000_000L
+        val now = first + 10 * 60 * 1000L // 10 минут спустя
+        assertTrue(FingerprintResolver.isWithinAttemptWindow(first, now))
+    }
+
+    @Test
+    fun windowBlocksAfterTwoHours() {
+        val first = 1_000_000L
+        val now = first + FingerprintResolver.ATTEMPT_WINDOW_MS + 1
+        assertFalse(FingerprintResolver.isWithinAttemptWindow(first, now))
+    }
+
+    @Test
+    fun windowBoundaryExactlyTwoHoursStillAllows() {
+        val first = 1_000_000L
+        val now = first + FingerprintResolver.ATTEMPT_WINDOW_MS
+        assertTrue(FingerprintResolver.isWithinAttemptWindow(first, now))
+    }
 }
