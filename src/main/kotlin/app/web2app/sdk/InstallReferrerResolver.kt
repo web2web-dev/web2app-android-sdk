@@ -26,19 +26,44 @@ internal class InstallReferrerResolver(private val config: Web2AppConfig) {
                             val raw = client.installReferrer.installReferrer
                             val token = extractToken(raw)
                             if (token.isNullOrEmpty()) {
+                                // Органика: referrer прочитан, но нашего токена в нём нет.
+                                SdkLogger.log(
+                                    "identify.referrer_empty",
+                                    "referrer прочитан, но опознавательного токена в нём нет",
+                                    level = "warn",
+                                )
                                 onResult(Result.failure(IllegalStateException("no token in referrer")))
                             } else {
+                                SdkLogger.log("identify.referrer_received")
+                                SdkLogger.log("identify.resolving_token")
                                 AttributionResolver(config).resolveToken(token, onResult)
                             }
                         }
                         // Huawei/sideload — API недоступен → email-fallback.
-                        InstallReferrerClient.InstallReferrerResponse.FEATURE_NOT_SUPPORTED ->
+                        InstallReferrerClient.InstallReferrerResponse.FEATURE_NOT_SUPPORTED -> {
+                            SdkLogger.log(
+                                "identify.referrer_unsupported",
+                                "Install Referrer недоступен (Huawei/sideload)",
+                                level = "warn",
+                            )
                             onResult(Result.failure(IllegalStateException("referrer FEATURE_NOT_SUPPORTED")))
+                        }
                         // Транзиент — caller может повторить identify() позже.
-                        InstallReferrerClient.InstallReferrerResponse.SERVICE_UNAVAILABLE ->
+                        InstallReferrerClient.InstallReferrerResponse.SERVICE_UNAVAILABLE -> {
+                            SdkLogger.log(
+                                "identify.referrer_unavailable",
+                                "сервис Install Referrer временно недоступен",
+                                level = "warn",
+                            )
                             onResult(Result.failure(IllegalStateException("referrer SERVICE_UNAVAILABLE")))
-                        else ->
+                        }
+                        else -> {
+                            SdkLogger.error(
+                                "identify.referrer_error",
+                                context = mapOf("code" to responseCode.toString()),
+                            )
                             onResult(Result.failure(IllegalStateException("referrer code=$responseCode")))
+                        }
                     }
                 } catch (e: Exception) {
                     onResult(Result.failure(e))

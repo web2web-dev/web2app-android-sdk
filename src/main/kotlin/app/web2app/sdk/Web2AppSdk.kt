@@ -38,15 +38,27 @@ object Web2AppSdk {
 
     /** Инициализация. [projectId] = ключ проекта арендатора; [baseUrl] = наш API. */
     fun configure(context: Context, projectId: String, baseUrl: String) {
-        config = Web2AppConfig(projectId, baseUrl.trimEnd('/'))
+        val cfg = Web2AppConfig(projectId, baseUrl.trimEnd('/'))
+        config = cfg
         guidStore = GuidStore(context.applicationContext)
+        SdkLogger.attach(cfg, context.applicationContext)
+        // Уже опознанный guid — сразу в контекст журнала (best-effort: сбой
+        // хранилища не имеет права уронить configure, guid догонит на identify).
+        runCatching { guidStore.load() }.getOrNull()?.let { SdkLogger.setGuid(it) }
+        SdkLogger.log("configure", context = mapOf("baseUrl" to cfg.baseUrl))
     }
 
     /**
      * Резолвит и персистит guid. Порядок (первый запуск):
      *  1. Сохранённый guid → возвращаем (steady-state).
      *  2. Install Referrer (`&referrer=<token>`) → resolve → guid.
-     *  3. Промах (Huawei/sideload/органика, FEATURE_NOT_SUPPORTED) → [onNeedEmail] (email-fallback).
+     *  3. Промах (Huawei/sideload/органика, FEATURE_NOT_SUPPORTED) → опознание
+     *     по отпечатку устройства (WEB-1213, паритет iOS 0.7.0): сигналы
+     *     устройства → `POST /public/handoff/resolve-by-fingerprint`; guid
+     *     приходит только при единственном уверенном совпадении с сигналами,
+     *     которые веб-страница оставила в момент ухода покупателя в стор.
+     *  4. Промах отпечатка → [onNeedEmail] (email-fallback) — поведение не
+     *     хуже старого.
      * На успехе — APP_INSTALLED-продюсер (best-effort).
      */
     fun identify(
@@ -54,22 +66,53 @@ object Web2AppSdk {
         onNeedEmail: () -> Unit = {},
     ) {
         // Обёртка на главный поток РОВНО одна и на входе: ниже по коду (включая
-        // ранние возвраты и колбэк резолвера) зовём только обёрнутые.
+        // ранние возвраты и колбэки резолверов) зовём только обёрнутые.
         val deliver = MainThread.wrap(onResult)
         val deliverNeedEmail = MainThread.wrapNoArgs(onNeedEmail)
 
-        val cfg = config ?: return deliver(Result.failure(IllegalStateException("not configured")))
+        val cfg = config
+        if (cfg == null) {
+            SdkLogger.error("identify.not_configured")
+            return deliver(Result.failure(IllegalStateException("not configured")))
+        }
 
-        guidStore.load()?.let { return deliver(Result.success(it)) }
+        guidStore.load()?.let {
+            SdkLogger.setGuid(it)
+            SdkLogger.log("identify.cached_guid")
+            return deliver(Result.success(it))
+        }
 
         InstallReferrerResolver(cfg).readAndResolve(guidStore.context) { result ->
             result.onSuccess { guid ->
                 guidStore.save(guid)
+                SdkLogger.setGuid(guid)
+                SdkLogger.log("identify.resolved")
                 AppCallbackProducer(cfg).reportAppInstalled(guid)
                 deliver(Result.success(guid))
             }.onFailure {
-                // Промах referrer → email-fallback (НЕ падаем молча).
-                deliverNeedEmail()
+                // WEB-1213: промах referrer → СНАЧАЛА опознание по отпечатку
+                // устройства; любой промах отпечатка → прежний email-fallback
+                // (НЕ падаем молча, поведение не хуже старого).
+                SdkLogger.log("identify.fingerprint_attempt")
+                FingerprintResolver(cfg).resolve { match ->
+                    if (match != null) {
+                        guidStore.save(match.guid)
+                        SdkLogger.setGuid(match.guid)
+                        SdkLogger.log(
+                            "identify.fingerprint_matched",
+                            context = mapOf("matchMethod" to (match.matchMethod ?: "unknown")),
+                        )
+                        AppCallbackProducer(cfg).reportAppInstalled(match.guid)
+                        deliver(Result.success(match.guid))
+                    } else {
+                        SdkLogger.log(
+                            "identify.needs_email_fallback",
+                            "ни referrer-токена, ни совпадения отпечатка — нужен email-экран",
+                            level = "warn",
+                        )
+                        deliverNeedEmail()
+                    }
+                }
             }
         }
     }
@@ -82,8 +125,18 @@ object Web2AppSdk {
      */
     fun requestEmailRecovery(email: String, onResult: (Result<Unit>) -> Unit) {
         val deliver = MainThread.wrap(onResult)
-        val cfg = config ?: return deliver(Result.failure(IllegalStateException("not configured")))
-        AttributionResolver(cfg).requestEmailRecovery(email, deliver)
+        val cfg = config
+        if (cfg == null) {
+            SdkLogger.error("email_recovery.not_configured")
+            return deliver(Result.failure(IllegalStateException("not configured")))
+        }
+        // PII: сам email в журнал сознательно не пишется — только факт запроса.
+        SdkLogger.log("email_recovery.requested")
+        AttributionResolver(cfg).requestEmailRecovery(email) { result ->
+            result.onSuccess { SdkLogger.log("email_recovery.sent") }
+                .onFailure { SdkLogger.error("email_recovery.failed", it.message ?: "") }
+            deliver(result)
+        }
     }
 
     /**
@@ -94,11 +147,20 @@ object Web2AppSdk {
      */
     fun identifyWithDeepLinkValue(token: String, onResult: (Result<String>) -> Unit) {
         val deliver = MainThread.wrap(onResult)
-        val cfg = config ?: return deliver(Result.failure(IllegalStateException("not configured")))
+        val cfg = config
+        if (cfg == null) {
+            SdkLogger.error("identify.not_configured")
+            return deliver(Result.failure(IllegalStateException("not configured")))
+        }
+        SdkLogger.log("identify.resolving_token")
         AttributionResolver(cfg).resolveToken(token) { result ->
             result.onSuccess { guid ->
                 guidStore.save(guid)
+                SdkLogger.setGuid(guid)
+                SdkLogger.log("identify.resolved")
                 AppCallbackProducer(cfg).reportAppInstalled(guid)
+            }.onFailure {
+                SdkLogger.error("identify.resolve_failed", it.message ?: "")
             }
             deliver(result)
         }
@@ -109,8 +171,22 @@ object Web2AppSdk {
         val deliver = MainThread.wrap(onResult)
         val cfg = config
         val guid = if (::guidStore.isInitialized) guidStore.load() else null
-        if (cfg == null || guid == null) return deliver(null)
-        EntitlementClient(cfg).fetch(guid, deliver)
+        if (cfg == null || guid == null) {
+            SdkLogger.log(
+                "entitlement.skipped",
+                "нет configure или сохранённого guid",
+                level = "warn",
+            )
+            return deliver(null)
+        }
+        SdkLogger.log("entitlement.fetch")
+        EntitlementClient(cfg).fetch(guid) { grant ->
+            SdkLogger.log(
+                "entitlement.result",
+                context = mapOf("status" to (grant?.status ?: "none")),
+            )
+            deliver(grant)
+        }
     }
 
     /** Текущий guid (client-held ключ). */
@@ -176,15 +252,29 @@ object Web2AppSdk {
         revenuecatProfileId: String?,
         deliver: (EntitlementGrant?) -> Unit,
     ) {
-        val cfg = config ?: return deliver(null)
+        val cfg = config
+        if (cfg == null) {
+            SdkLogger.error("paywall.not_configured")
+            return deliver(null)
+        }
 
         // guid-поллинг: берём client-held guid или чеканим новый — grant на вебе ляжет на него.
         val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
             ?: UUID.randomUUID().toString()
         if (::guidStore.isInitialized) guidStore.save(guid)
+        SdkLogger.setGuid(guid)
 
         val url = WebPaywallLauncher
             .appOriginUrl(paywallUrl, email, guid, adaptyProfileId, revenuecatProfileId)
+        SdkLogger.log(
+            "paywall.open_custom_tab",
+            context = mapOf(
+                "host" to hostOf(paywallUrl),
+                "hasEmail" to (!email.isNullOrEmpty()).toString(),
+                "hasAdaptyId" to (!adaptyProfileId.isNullOrEmpty()).toString(),
+                "hasRevenuecatId" to (!revenuecatProfileId.isNullOrEmpty()).toString(),
+            ),
+        )
         CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
 
         // Поллим право по нашему guid: 30 попыток × 2с ≈ 60с (покрывает Stripe webhook→grant).
@@ -193,7 +283,13 @@ object Web2AppSdk {
             intervalMs = 2_000,
             maxAttempts = 30,
             fetch = { cb -> client.fetch(guid, cb) },
-            completion = deliver,
+            completion = { grant ->
+                SdkLogger.log(
+                    "paywall.poll_result",
+                    context = mapOf("active" to (grant != null).toString()),
+                )
+                deliver(grant)
+            },
         )
     }
 
@@ -218,6 +314,7 @@ object Web2AppSdk {
     ): Boolean {
         // Чужой deep-link: колбэк не зовём вовсе — контракт «false и тишина».
         if (!WebPaywallLauncher.isHandoffReturnUrl(url)) return false
+        SdkLogger.log("return_url.recognized")
         val deliver = MainThread.wrap(onResult)
         val cfg = config
         val guid = if (::guidStore.isInitialized) guidStore.load() else null
@@ -319,16 +416,34 @@ object Web2AppSdk {
         deliver: (PaywallResult) -> Unit,
     ) {
         // Без configure пейволл не показать — это НЕ «не оплатил» (паритет iOS .unavailable).
-        val cfg = config ?: return deliver(PaywallResult.Unavailable)
+        val cfg = config
+        if (cfg == null) {
+            SdkLogger.error("paywall.not_configured")
+            return deliver(PaywallResult.Unavailable)
+        }
         val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
             ?: UUID.randomUUID().toString()
         if (::guidStore.isInitialized) guidStore.save(guid)
+        SdkLogger.setGuid(guid)
 
         val url = WebPaywallLauncher
             .appOriginUrl(paywallUrl, email, guid, adaptyProfileId, revenuecatProfileId)
+        SdkLogger.log(
+            "paywall.open_embedded",
+            context = mapOf(
+                "host" to hostOf(paywallUrl),
+                "hasEmail" to (!email.isNullOrEmpty()).toString(),
+                "hasAdaptyId" to (!adaptyProfileId.isNullOrEmpty()).toString(),
+                "hasRevenuecatId" to (!revenuecatProfileId.isNullOrEmpty()).toString(),
+            ),
+        )
         val client = EntitlementClient(cfg)
         val callbackId = UUID.randomUUID().toString()
         EmbeddedPaywallCallbacks.register(callbackId) { event ->
+            SdkLogger.log(
+                "paywall.webview_closed",
+                context = mapOf("bridgeEvent" to (event?.name ?: "none")),
+            )
             // Окно поллинга одинаковое для всех исходов, включая нативное закрытие
             // (event == null): вебхук Stripe доезжает секундами позже закрытия окна.
             val attempts = WebPaywallLauncher.embeddedPollAttempts(event)
@@ -338,9 +453,18 @@ object Web2AppSdk {
                 fetch = { cb -> client.fetch(guid, cb) },
             ) { grant ->
                 when {
-                    grant != null -> deliver(PaywallResult.Paid(grant))
-                    event == BridgeEvent.PAYMENT_SUCCESS -> deliver(PaywallResult.Pending)
-                    else -> deliver(PaywallResult.NotPaid)
+                    grant != null -> {
+                        SdkLogger.log("paywall.result", context = mapOf("result" to "paid"))
+                        deliver(PaywallResult.Paid(grant))
+                    }
+                    event == BridgeEvent.PAYMENT_SUCCESS -> {
+                        SdkLogger.log("paywall.result", context = mapOf("result" to "pending"))
+                        deliver(PaywallResult.Pending)
+                    }
+                    else -> {
+                        SdkLogger.log("paywall.result", context = mapOf("result" to "notPaid"))
+                        deliver(PaywallResult.NotPaid)
+                    }
                 }
             }
         }
@@ -429,16 +553,30 @@ object Web2AppSdk {
         val deliver = MainThread.wrap(onClose)
         // Без configure guid не сохранить: веб связал бы прохождение с ключом,
         // который прилка тут же потеряет. Экран не показываем — это НЕ «закрыли».
-        if (config == null) return deliver(QuizResult.Unavailable)
+        if (config == null) {
+            SdkLogger.error("quiz.not_configured")
+            return deliver(QuizResult.Unavailable)
+        }
 
         val guid = (if (::guidStore.isInitialized) guidStore.load() else null)
             ?: UUID.randomUUID().toString()
         if (::guidStore.isInitialized) guidStore.save(guid)
+        SdkLogger.setGuid(guid)
 
         val url = QuizPresentation
             .quizUrl(quizUrl, email, guid, adaptyProfileId, revenuecatProfileId)
+        SdkLogger.log(
+            "quiz.open",
+            context = mapOf(
+                "host" to hostOf(quizUrl),
+                "hasEmail" to (!email.isNullOrEmpty()).toString(),
+            ),
+        )
         val callbackId = UUID.randomUUID().toString()
-        QuizPresentation.registerCloseCallback(callbackId, deliver)
+        QuizPresentation.registerCloseCallback(callbackId) { result ->
+            SdkLogger.log("quiz.closed", context = mapOf("result" to quizResultLabel(result)))
+            deliver(result)
+        }
         EmbeddedPaywallActivity.start(context, url, callbackId)
     }
 
@@ -469,22 +607,47 @@ object Web2AppSdk {
     }
 
     /**
-     * Точка входа моста. Слушателя нет → не делаем даже прыжка на главный поток.
-     * Обёртка [MainThread] здесь ровно одна — событие рождается на потоке
+     * Точка входа моста. Журнал получает `funnel.<имя>` в любом случае (паритет
+     * iOS); слушателя нет → прыжка на главный поток не делаем. Обёртка
+     * [MainThread] здесь ровно одна — событие рождается на потоке
      * JavascriptInterface.
      */
     internal fun emitFunnelEvent(name: String, data: FunnelEventData) {
+        val ctx = buildMap {
+            data.screenId?.let { put("screenId", it) }
+            data.screenIndex?.let { put("screenIndex", it.toString()) }
+            data.blockType?.let { put("blockType", it) }
+        }
+        SdkLogger.log("funnel.$name", context = ctx)
         val listener = funnelEventListener ?: return
         MainThread.post { listener(name, data) }
     }
 
     private fun resolvePaywallUrl(paywallId: String, onResult: (String?) -> Unit) {
         val cfg = config ?: return onResult(null)
+        SdkLogger.log("paywall.resolve_url", context = mapOf("paywallId" to paywallId))
         Http.io {
             val encoded = java.net.URLEncoder.encode(paywallId, "UTF-8")
-            val body = Http.get("${cfg.baseUrl}/public/paywall-url/$encoded")
-            onResult(WebPaywallLauncher.parsePaywallUrlResponse(body))
+            val resp = Http.getWithStatus("${cfg.baseUrl}/public/paywall-url/$encoded")
+            val url = WebPaywallLauncher.parsePaywallUrlResponse(resp.body)
+            if (url == null) {
+                SdkLogger.error(
+                    "paywall.resolve_url_failed",
+                    context = mapOf("paywallId" to paywallId, "http" to resp.code.toString()),
+                )
+            }
+            onResult(url)
         }
+    }
+
+    /** Хост URL — для контекста журнала (без query/path: PII туда не попадает). */
+    private fun hostOf(url: String): String =
+        runCatching { java.net.URI(url).host }.getOrNull() ?: ""
+
+    /** Человекочитаемый исход квиза для журнала (без PII). */
+    private fun quizResultLabel(result: QuizResult): String = when (result) {
+        is QuizResult.Closed -> "closed(${result.reason.name})"
+        QuizResult.Unavailable -> "unavailable"
     }
 
     /**

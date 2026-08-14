@@ -51,7 +51,7 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "com.github.web2web-dev"
                 artifactId = "web2app-android-sdk"
-                version = "0.5.0"
+                version = "0.7.0"
             }
         }
     }

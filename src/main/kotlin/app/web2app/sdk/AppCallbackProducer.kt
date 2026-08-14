@@ -9,6 +9,7 @@ import org.json.JSONObject
  */
 internal class AppCallbackProducer(private val config: Web2AppConfig) {
     fun reportAppInstalled(guid: String) {
+        SdkLogger.log("app_callback.sending")
         Http.io {
             val body = JSONObject()
                 .put("guid", guid)
@@ -16,8 +17,13 @@ internal class AppCallbackProducer(private val config: Web2AppConfig) {
                 .put("device", "android")
                 .put("event", "app_installed")
                 .toString()
-            // Сбой метрики НЕ ломает пользовательский поток.
-            Http.postJson("${config.baseUrl}/public/handoff/app-callback", body)
+            // Сбой метрики НЕ ломает пользовательский поток — только журнал.
+            val resp = Http.postWithStatus("${config.baseUrl}/public/handoff/app-callback", body)
+            if (resp.code in 200..299) {
+                SdkLogger.log("app_callback.sent", context = mapOf("http" to resp.code.toString()))
+            } else {
+                SdkLogger.error("app_callback.failed", context = mapOf("http" to resp.code.toString()))
+            }
         }
     }
 }

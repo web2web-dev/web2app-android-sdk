@@ -23,9 +23,19 @@ internal class EntitlementClient(private val config: Web2AppConfig) {
     fun fetch(guid: String, onResult: (EntitlementGrant?) -> Unit) {
         Http.io {
             val q = URLEncoder.encode(guid, "UTF-8")
-            val body = Http.get("${config.baseUrl}/public/entitlement?guid=$q")
-            val grant = body?.let {
-                val grants = JSONObject(it).optJSONArray("grants")
+            val resp = Http.getWithStatus("${config.baseUrl}/public/entitlement?guid=$q")
+            if (resp.body == null) {
+                // 0 = сетевое исключение, иначе HTTP-код неуспеха (паритет iOS
+                // entitlement.network_error).
+                SdkLogger.error(
+                    "entitlement.network_error",
+                    context = mapOf("http" to resp.code.toString()),
+                )
+                onResult(null)
+                return@io
+            }
+            val grant = runCatching {
+                val grants = JSONObject(resp.body).optJSONArray("grants")
                 if (grants != null && grants.length() > 0) {
                     val g = grants.getJSONObject(0)
                     EntitlementGrant(
@@ -35,38 +45,43 @@ internal class EntitlementClient(private val config: Web2AppConfig) {
                         priceId = if (g.isNull("price_id")) null else g.optString("price_id"),
                     )
                 } else null
+            }.getOrElse {
+                // Мусор вместо JSON — раньше исключение молча убивало daemon-поток
+                // и onResult не приходил вовсе; теперь это видимый decode_failed.
+                SdkLogger.error(
+                    "entitlement.decode_failed",
+                    context = mapOf("http" to resp.code.toString()),
+                )
+                null
             }
             onResult(grant)
         }
     }
 }
 
+/** Ответ HTTP-хелпера: [code] (0 = сеть/исключение), [body] — тело 2xx-ответа. */
+internal data class HttpResponse(val code: Int, val body: String?)
+
 /** Тонкий HTTP-хелпер на HttpURLConnection (без OkHttp-зависимости в скелете). */
 internal object Http {
     fun io(block: () -> Unit) = Thread(block).apply { isDaemon = true }.start()
 
-    fun get(url: String): String? = request(url, "GET", null)
+    fun get(url: String): String? = requestWithStatus(url, "GET", null).body
 
-    fun postJson(url: String, json: String): String? = request(url, "POST", json)
+    fun postJson(url: String, json: String): String? = requestWithStatus(url, "POST", json).body
 
     /** POST для эндпоинтов без тела ответа (напр. 204). true = 2xx. */
-    fun postOk(url: String, json: String): Boolean = try {
-        (URL(url).openConnection() as HttpURLConnection).run {
-            requestMethod = "POST"
-            connectTimeout = 10_000
-            readTimeout = 10_000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            outputStream.use { it.write(json.toByteArray()) }
-            val ok = responseCode in 200..299
-            disconnect()
-            ok
-        }
-    } catch (_: Exception) {
-        false
-    }
+    fun postOk(url: String, json: String): Boolean =
+        requestWithStatus(url, "POST", json).code in 200..299
 
-    private fun request(url: String, method: String, json: String?): String? = try {
+    /** GET с HTTP-кодом — для журнала ошибок (SdkLogger). */
+    fun getWithStatus(url: String): HttpResponse = requestWithStatus(url, "GET", null)
+
+    /** POST с HTTP-кодом — для журнала ошибок (SdkLogger). */
+    fun postWithStatus(url: String, json: String): HttpResponse =
+        requestWithStatus(url, "POST", json)
+
+    private fun requestWithStatus(url: String, method: String, json: String?): HttpResponse = try {
         (URL(url).openConnection() as HttpURLConnection).run {
             requestMethod = method
             connectTimeout = 10_000
@@ -76,13 +91,14 @@ internal object Http {
                 setRequestProperty("Content-Type", "application/json")
                 outputStream.use { it.write(json.toByteArray()) }
             }
-            val ok = responseCode in 200..299
+            val code = responseCode
+            val ok = code in 200..299
             val stream = if (ok) inputStream else errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }
             disconnect()
-            if (ok) text else null
+            HttpResponse(code, if (ok) text else null)
         }
     } catch (_: Exception) {
-        null
+        HttpResponse(0, null)
     }
 }

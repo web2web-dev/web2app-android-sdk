@@ -13,7 +13,16 @@ internal class AttributionResolver(private val config: Web2AppConfig) {
     fun resolveToken(token: String, onResult: (Result<String>) -> Unit) {
         Http.io {
             val q = URLEncoder.encode(token, "UTF-8")
-            onResult(parseGuid(Http.get("${config.baseUrl}/public/handoff/resolve?code=$q")))
+            val resp = Http.getWithStatus("${config.baseUrl}/public/handoff/resolve?code=$q")
+            val guid = parseGuidResponse(resp.body)
+            if (guid != null) {
+                onResult(Result.success(guid))
+            } else {
+                // В журнал — с HTTP-кодом (0 = сетевое исключение, 404 =
+                // унифицированный негатив бэка). Паритет iOS resolve.failed.
+                SdkLogger.error("resolve.failed", context = mapOf("http" to resp.code.toString()))
+                onResult(Result.failure(IllegalStateException("resolve failed")))
+            }
         }
     }
 
@@ -28,15 +37,23 @@ internal class AttributionResolver(private val config: Web2AppConfig) {
                 .put("projectId", config.projectId)
                 .put("email", email)
                 .toString()
-            val ok = Http.postOk("${config.baseUrl}/public/handoff/email-recovery/request", body)
-            onResult(if (ok) Result.success(Unit) else Result.failure(IllegalStateException("email-recovery request failed")))
+            val resp = Http.postWithStatus(
+                "${config.baseUrl}/public/handoff/email-recovery/request",
+                body,
+            )
+            val ok = resp.code in 200..299
+            if (!ok) {
+                // PII: email в журнал не пишется — только HTTP-код неуспеха.
+                SdkLogger.error(
+                    "email_recovery.http_error",
+                    context = mapOf("http" to resp.code.toString()),
+                )
+            }
+            onResult(
+                if (ok) Result.success(Unit)
+                else Result.failure(IllegalStateException("email-recovery request failed")),
+            )
         }
-    }
-
-    private fun parseGuid(body: String?): Result<String> {
-        val guid = parseGuidResponse(body)
-        return if (guid != null) Result.success(guid)
-        else Result.failure(IllegalStateException("resolve failed"))
     }
 
     companion object {
