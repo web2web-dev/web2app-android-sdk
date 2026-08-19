@@ -68,6 +68,29 @@ Web2AppSdk.entitlement { grant ->
 }
 ```
 
+### Тестовый режим проекта
+
+Если проект в кабинете переведён в тестовый режим, бэкенд отдаёт **синтетический**
+грант: он выглядит активным (`isActive == true`), но помечен `testMode == true`.
+Это не настоящая оплата — **не выдавайте по такому гранту боевой контент**:
+
+```kotlin
+Web2AppSdk.entitlement { grant ->
+    when {
+        grant == null || !grant.isActive -> lock()
+        grant.testMode -> {
+            // тестовый доступ: открывайте контент только в dev/QA-сборках
+        }
+        else -> {
+            // боевой доступ
+        }
+    }
+}
+```
+
+У боевых грантов поле отсутствует или `false` — SDK читает его как `false`,
+старые ответы без поля не ломаются.
+
 ### Где взять Project ID
 
 В веб-кабинете: **проект → Настройки → «Подключение приложения» → «Полный мост»** —
@@ -82,7 +105,7 @@ Web2AppSdk.entitlement { grant ->
 | `configure(context, projectId, baseUrl)` | Инициализация SDK. Вызвать один раз при старте. |
 | `identify(onResult, onNeedEmail)` | Опознать пользователя. Порядок: сохранённый guid → Install Referrer → отпечаток устройства; только если промахнулось всё — `onNeedEmail`. |
 | `requestEmailRecovery(email, onResult)` | Запросить восстановление по email — мы отправим пользователю ссылку-магнит. |
-| `entitlement { grant -> }` | Получить текущий доступ (`grant.isActive`, `level`, `status`, `expiresAt`). |
+| `entitlement { grant -> }` | Получить текущий доступ (`grant.isActive`, `level`, `status`, `expiresAt`, `testMode` — см. «Тестовый режим проекта»). |
 | `currentGuid()` | Текущий идентификатор пользователя (если уже опознан). |
 | `openWebPaywall(context, paywallUrl, email) { grant -> }` | Показать веб-пейволл в Chrome Custom Tab; доступ придёт по guid-поллингу. |
 | `openWebPaywallById(context, paywallId, email) { grant -> }` | То же по ID пейволла из кабинета — URL резолвится сам. |

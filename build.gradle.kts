@@ -41,6 +41,10 @@ dependencies {
     // MMP-SDK (AppsFlyer/Adjust) — НЕ зависимость SDK: интегратор передаёт deep_link_value
     // из своего MMP-callback в Web2App.identify(...). См. README (POC-1).
     testImplementation("junit:junit:4.13.2")
+    // WEB-1166: настоящий org.json в JVM-юнитах — заглушка android.jar отдаёт
+    // дефолты (ловушка L-4, см. AttributionParseTest), парс-тесты
+    // EntitlementClient на ней были бы бессмысленны.
+    testImplementation("org.json:json:20240303")
 }
 
 // JitPack/Maven-публикация. group = com.github.web2web-dev (JitPack-конвенция по GitHub-орг).
