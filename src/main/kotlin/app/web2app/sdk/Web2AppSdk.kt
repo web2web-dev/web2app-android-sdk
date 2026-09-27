@@ -36,6 +36,9 @@ object Web2AppSdk {
      * Слушатель событий воронки ([setFunnelEventListener]). `@Volatile` —
      * пишется с потока интегратора, читается с потока JavascriptInterface.
      */
+    /** 0.7.2: «id пейволла → адрес» на час для встроенного показа по id. */
+    private val paywallUrlCache = PaywallUrlCache()
+
     @Volatile
     private var funnelEventListener: ((String, FunnelEventData) -> Unit)? = null
 
@@ -51,6 +54,10 @@ object Web2AppSdk {
         // хранилища не имеет права уронить configure, guid догонит на identify).
         runCatching { guidStore.load() }.getOrNull()?.let { SdkLogger.setGuid(it) }
         SdkLogger.log("configure", context = mapOf("baseUrl" to cfg.baseUrl))
+        // 0.7.2: мог смениться проект/сервер — адреса прежнего не годятся.
+        paywallUrlCache.clear()
+        // 0.7.2: прогрев движка WebView — первый встроенный показ не платит за его загрузку.
+        WebViewWarmup.warmUp(context)
     }
 
     /**
@@ -179,6 +186,8 @@ object Web2AppSdk {
         AttributionResolver(cfg).resolveToken(token) { result ->
             result.onSuccess { guid ->
                 guidStore.save(guid)
+                // 0.7.2: guid сменился — кэш адресов пейволла сбрасываем.
+                paywallUrlCache.clear()
                 SdkLogger.setGuid(guid)
                 SdkLogger.log("identify.resolved")
                 AppCallbackProducer(cfg).reportAppInstalled(guid)
@@ -527,7 +536,7 @@ object Web2AppSdk {
     ) {
         // Обёртка одна — делегируем УЖЕ обёрнутый колбэк во внутреннее тело.
         val deliver = MainThread.wrap(onResult)
-        resolvePaywallUrl(paywallId) { url ->
+        resolvePaywallUrl(paywallId, useCache = true) { url ->
             if (url == null) deliver(PaywallResult.Unavailable)
             else openWebPaywallEmbeddedInternal(
                 context,
@@ -664,8 +673,23 @@ object Web2AppSdk {
         MainThread.post { listener(name, data) }
     }
 
-    private fun resolvePaywallUrl(paywallId: String, onResult: (String?) -> Unit) {
+    /**
+     * [useCache] — 0.7.2, только встроенный показ по id: свежий (моложе часа) адрес
+     * из [paywallUrlCache] отдаётся сразу, без сети; промах — прежний путь, успешный
+     * ответ кладётся в кэш.
+     */
+    private fun resolvePaywallUrl(
+        paywallId: String,
+        useCache: Boolean = false,
+        onResult: (String?) -> Unit,
+    ) {
         val cfg = config ?: return onResult(null)
+        if (useCache) {
+            paywallUrlCache.get(paywallId)?.let { cached ->
+                SdkLogger.log("paywall.resolve_url_cached", context = mapOf("paywallId" to paywallId))
+                return onResult(cached)
+            }
+        }
         SdkLogger.log("paywall.resolve_url", context = mapOf("paywallId" to paywallId))
         Http.io {
             val encoded = java.net.URLEncoder.encode(paywallId, "UTF-8")
@@ -676,6 +700,8 @@ object Web2AppSdk {
                     "paywall.resolve_url_failed",
                     context = mapOf("paywallId" to paywallId, "http" to resp.code.toString()),
                 )
+            } else if (useCache) {
+                paywallUrlCache.put(paywallId, url)
             }
             onResult(url)
         }
@@ -708,6 +734,7 @@ object Web2AppSdk {
     )
     fun debugSetGuid(guid: String) {
         if (::guidStore.isInitialized) guidStore.save(guid)
+        paywallUrlCache.clear()
     }
 
     /** DEBUG-only: сброс сохранённого guid. См. оговорку у [debugSetGuid]. */
@@ -720,6 +747,7 @@ object Web2AppSdk {
     )
     fun debugClear() {
         if (::guidStore.isInitialized) guidStore.clear()
+        paywallUrlCache.clear()
     }
 }
 
