@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
 internal object SdkLogger {
 
     /** Версия SDK — уезжает в каждую пачку журнала. Синхронна с build.gradle.kts. */
-    const val SDK_VERSION = "0.7.0"
+    const val SDK_VERSION = "0.7.2"
 
     private const val TAG = "Web2App"
 
