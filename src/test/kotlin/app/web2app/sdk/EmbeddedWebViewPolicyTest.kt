@@ -129,4 +129,17 @@ class EmbeddedWebViewPolicyTest {
 
         assertEquals(listOf<QuizResult>(QuizResult.Unavailable), results)
     }
+
+    // ── Индикатор загрузки ──────────────────────────────────────────────────
+
+    @Test
+    fun mainFrameLoadErrorHidesIndicator() {
+        assertTrue(EmbeddedWebViewPolicy.reactsToLoadError(isForMainFrame = true))
+    }
+
+    @Test
+    fun subresourceLoadErrorIsIgnored() {
+        // Упала картинка/счётчик — страница жива, индикатор спрячет onPageFinished.
+        assertFalse(EmbeddedWebViewPolicy.reactsToLoadError(isForMainFrame = false))
+    }
 }

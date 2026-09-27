@@ -12,9 +12,12 @@ import android.view.Gravity
 import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.annotation.RequiresApi
 
@@ -39,8 +42,15 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     /** Адрес показа — нужен, чтобы загрузить страницу заново в новом WebView. */
     private lateinit var pageUrl: String
 
-    /** Контейнер экрана: WebView — нижний слой, крестик поверх. */
+    /** Контейнер экрана: WebView — нижний слой, над ним индикатор, сверху крестик. */
     private lateinit var root: FrameLayout
+
+    /**
+     * 0.7.2 — системный индикатор загрузки по центру вместо белого экрана. Виден
+     * до `onPageFinished` (или до ошибки главного кадра). Текстов нет — только
+     * системный элемент, цвет системный.
+     */
+    private lateinit var loadingIndicator: ProgressBar
 
     /** Текущий WebView (после гибели процесса страницы — уже новый). */
     private var webView: WebView? = null
@@ -82,7 +92,16 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
             }
         }
 
+        loadingIndicator = ProgressBar(this).apply { isIndeterminate = true }
         root = FrameLayout(this).apply {
+            addView(
+                loadingIndicator,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER,
+                ),
+            )
             val size = (36 * density).toInt()
             val margin = (16 * density).toInt()
             addView(
@@ -118,6 +137,7 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
+        loadingIndicator.visibility = View.VISIBLE
         view.loadUrl(pageUrl)
     }
 
@@ -201,6 +221,25 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     }
 
     private inner class PageClient : WebViewClient() {
+        override fun onPageFinished(view: WebView, url: String?) {
+            if (view === webView) loadingIndicator.visibility = View.GONE
+        }
+
+        /**
+         * Ошибка главного кадра (нет сети, DNS, таймаут): прячем индикатор и пишем
+         * в журнал код ошибки. Сообщения человеку нет (в SDK надписей не заводим) —
+         * остаётся крестик. Адрес и описание ошибки не пишем: в адресе email.
+         */
+        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+            if (view !== webView) return
+            if (!EmbeddedWebViewPolicy.reactsToLoadError(request.isForMainFrame)) return
+            loadingIndicator.visibility = View.GONE
+            SdkLogger.error(
+                "paywall.webview_load_failed",
+                context = mapOf("errorCode" to error.errorCode.toString()),
+            )
+        }
+
         /**
          * true = «гибель обработана, приложение не ронять». Вызывается системой
          * только с API 26 (minSdk 24): на 24-25 метода у WebViewClient нет, там

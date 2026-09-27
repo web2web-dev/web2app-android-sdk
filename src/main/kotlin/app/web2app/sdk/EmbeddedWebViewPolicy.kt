@@ -50,6 +50,14 @@ internal object EmbeddedWebViewPolicy {
      */
     fun paywallResultAfterBrokenShow(grant: EntitlementGrant?): PaywallResult =
         if (grant != null) PaywallResult.Paid(grant) else PaywallResult.Unavailable
+
+    /**
+     * Реагировать ли на ошибку загрузки (прятать индикатор, писать
+     * `paywall.webview_load_failed`). Только главный кадр: сбой картинки, шрифта
+     * или счётчика не значит, что страница не открылась, — индикатор тогда
+     * спрячет `onPageFinished`.
+     */
+    fun reactsToLoadError(isForMainFrame: Boolean): Boolean = isForMainFrame
 }
 
 internal enum class RenderProcessGoneAction {
