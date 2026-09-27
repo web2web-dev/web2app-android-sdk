@@ -3,9 +3,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <application>
-        <!-- WEB-814: embedded-показ веб-пейволла (WebView + JS-мост). -->
+        <!-- WEB-814: embedded-показ веб-пейволла (WebView + JS-мост). Квиз идёт
+             через эту же Activity — отдельного экрана у него нет.
+             0.7.2: configChanges — поворот/тема/клавиатура НЕ пересоздают экран
+             (иначе пересоздание считалось закрытием, а страница грузилась заново). -->
         <activity
             android:name=".EmbeddedPaywallActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
             android:exported="false"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen" />
     </application>

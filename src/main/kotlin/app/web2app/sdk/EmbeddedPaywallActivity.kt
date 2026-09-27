@@ -113,8 +113,14 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     override fun onDestroy() {
         // Слабую ссылку чистим сами — по идентичности, чтобы не снести новый показ.
         EmbeddedPaywallPresentations.clear(this)
-        // Активити умерла без события (система убила/back) → отдать null один раз.
-        deliver(null)
+        if (EmbeddedWebViewPolicy.shouldDeliverCloseOnDestroy(isChangingConfigurations, isFinishing)) {
+            // Активити умерла без события (система убила/back) → отдать null один раз.
+            deliver(null)
+        } else {
+            // 0.7.2: пересоздание из-за смены конфигурации — не закрытие. Новая
+            // Activity поднимется с тем же Intent (тот же callbackId) и доиграет показ.
+            SdkLogger.log("paywall.recreated_on_config_change")
+        }
         super.onDestroy()
     }
 
