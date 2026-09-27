@@ -462,7 +462,25 @@ object Web2AppSdk {
         )
         val client = EntitlementClient(cfg)
         val callbackId = UUID.randomUUID().toString()
-        EmbeddedPaywallCallbacks.register(callbackId) { event ->
+        // 0.7.2: показ сорвался (процесс страницы погиб дважды подряд). Оплата могла
+        // пройти до сбоя — поллим тем же окном, что и нативное закрытие; нет права →
+        // Unavailable (пользователь ничего не отклонял, это не NotPaid).
+        val onBrokenShow: () -> Unit = {
+            SdkLogger.log("paywall.webview_closed", context = mapOf("bridgeEvent" to "unavailable"))
+            WebPaywallLauncher.pollForActiveGrant(
+                intervalMs = 1_000,
+                maxAttempts = WebPaywallLauncher.embeddedPollAttempts(null),
+                fetch = { cb -> client.fetch(guid, cb) },
+            ) { grant ->
+                val result = EmbeddedWebViewPolicy.paywallResultAfterBrokenShow(grant)
+                SdkLogger.log(
+                    "paywall.result",
+                    context = mapOf("result" to if (result is PaywallResult.Paid) "paid" else "unavailable"),
+                )
+                deliver(result)
+            }
+        }
+        EmbeddedPaywallCallbacks.register(callbackId, onUnavailable = onBrokenShow) { event ->
             SdkLogger.log(
                 "paywall.webview_closed",
                 context = mapOf("bridgeEvent" to (event?.name ?: "none")),

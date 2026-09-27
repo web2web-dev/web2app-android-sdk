@@ -56,6 +56,10 @@ internal object QuizPresentation {
      * публичного метода).
      */
     fun registerCloseCallback(callbackId: String, deliver: (QuizResult) -> Unit) {
-        EmbeddedPaywallCallbacks.register(callbackId) { event -> deliver(result(event)) }
+        // 0.7.2: показ сорвался (процесс страницы погиб дважды) — квиз не показан.
+        EmbeddedPaywallCallbacks.register(
+            callbackId,
+            onUnavailable = { deliver(QuizResult.Unavailable) },
+        ) { event -> deliver(result(event)) }
     }
 }

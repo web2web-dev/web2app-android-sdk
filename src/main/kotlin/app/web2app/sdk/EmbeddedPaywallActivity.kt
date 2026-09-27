@@ -6,14 +6,17 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.TextView
+import androidx.annotation.RequiresApi
 
 /**
  * WEB-814 — встроенный показ веб-пейволла (паритет iOS openWebPaywallEmbedded
@@ -33,6 +36,18 @@ import android.widget.TextView
 internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation {
     private var finishedWithEvent = false
 
+    /** Адрес показа — нужен, чтобы загрузить страницу заново в новом WebView. */
+    private lateinit var pageUrl: String
+
+    /** Контейнер экрана: WebView — нижний слой, крестик поверх. */
+    private lateinit var root: FrameLayout
+
+    /** Текущий WebView (после гибели процесса страницы — уже новый). */
+    private var webView: WebView? = null
+
+    /** 0.7.2: сколько раз за этот показ погибал процесс страницы. */
+    private var renderProcessTerminations = 0
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -46,13 +61,7 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
         // Показ состоится → он и есть активный; предыдущий (если был) вытесняется.
         EmbeddedPaywallPresentations.setActive(this)
 
-        val webView = WebView(this).apply {
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            webViewClient = WebViewClient()
-            addJavascriptInterface(Bridge(), "web2appBridge")
-            loadUrl(url)
-        }
+        pageUrl = url
 
         // Нативный крестик-фолбэк: полупрозрачная подложка (frosted, iOS 0.4.3).
         val density = resources.displayMetrics.density
@@ -73,14 +82,7 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
             }
         }
 
-        val root = FrameLayout(this).apply {
-            addView(
-                webView,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                ),
-            )
+        root = FrameLayout(this).apply {
             val size = (36 * density).toInt()
             val margin = (16 * density).toInt()
             addView(
@@ -92,6 +94,65 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
             )
         }
         setContentView(root)
+        attachNewWebView()
+    }
+
+    /**
+     * Создаёт WebView, кладёт его НИЖНИМ слоем (крестик остаётся поверх) и грузит
+     * [pageUrl]. Зовётся при старте показа и один раз после гибели процесса страницы.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun attachNewWebView() {
+        val view = WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            webViewClient = PageClient()
+            addJavascriptInterface(Bridge(), "web2appBridge")
+        }
+        webView = view
+        root.addView(
+            view,
+            0,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        view.loadUrl(pageUrl)
+    }
+
+    /**
+     * 0.7.2 — гибель процесса страницы (рендерера Chromium). Без обработки система
+     * роняет ВСЁ приложение интегратора. Погибший WebView больше не годен: убираем
+     * его из иерархии и уничтожаем; первый раз за показ — новый WebView и загрузка
+     * заново, второй — закрываем показ с результатом «недоступно».
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail) {
+        SdkLogger.error(
+            "paywall.webview_process_terminated",
+            context = mapOf(
+                "didCrash" to detail.didCrash().toString(),
+                "rendererPriorityAtExit" to
+                    EmbeddedWebViewPolicy.rendererPriorityName(detail.rendererPriorityAtExit()),
+            ),
+        )
+        root.removeView(view)
+        view.destroy()
+        if (webView === view) webView = null
+        // Экран уже закрывается — пересоздавать нечего, колбэк отдаст onDestroy.
+        if (isFinishing || isDestroyed) return
+
+        val action = EmbeddedWebViewPolicy.renderProcessGoneAction(renderProcessTerminations)
+        renderProcessTerminations++
+        when (action) {
+            RenderProcessGoneAction.RECREATE -> attachNewWebView()
+            RenderProcessGoneAction.GIVE_UP -> {
+                SdkLogger.error("paywall.webview_process_terminated_twice")
+                deliverUnavailable()
+                finish()
+            }
+        }
     }
 
     @Deprecated("Deprecated in Java")
@@ -129,6 +190,27 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
         finishedWithEvent = true
         val id = intent.getStringExtra(EXTRA_CALLBACK_ID) ?: return
         EmbeddedPaywallCallbacks.deliver(id, event)
+    }
+
+    /** Показ сорвался — «недоступно». Тот же one-shot гард, что у [deliver]. */
+    private fun deliverUnavailable() {
+        if (finishedWithEvent) return
+        finishedWithEvent = true
+        val id = intent.getStringExtra(EXTRA_CALLBACK_ID) ?: return
+        EmbeddedPaywallCallbacks.deliverUnavailable(id)
+    }
+
+    private inner class PageClient : WebViewClient() {
+        /**
+         * true = «гибель обработана, приложение не ронять». Вызывается системой
+         * только с API 26 (minSdk 24): на 24-25 метода у WebViewClient нет, там
+         * поведение прежнее.
+         */
+        @RequiresApi(Build.VERSION_CODES.O)
+        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+            this@EmbeddedPaywallActivity.onRenderProcessGone(view, detail)
+            return true
+        }
     }
 
     private inner class Bridge {
@@ -172,15 +254,38 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
  * циклом, лямбду в Intent не положить — передаём id, лямбда ждёт здесь.
  */
 internal object EmbeddedPaywallCallbacks {
-    private val pending = mutableMapOf<String, (BridgeEvent?) -> Unit>()
+    private class Pending(
+        val onClose: (BridgeEvent?) -> Unit,
+        val onUnavailable: (() -> Unit)?,
+    )
 
+    private val pending = mutableMapOf<String, Pending>()
+
+    /**
+     * [onUnavailable] — 0.7.2: показ сорвался (процесс страницы погиб дважды).
+     * Не задан → такой срыв отдаётся как обычное нативное закрытие (`null`).
+     */
     @Synchronized
-    fun register(id: String, callback: (BridgeEvent?) -> Unit) {
-        pending[id] = callback
+    fun register(
+        id: String,
+        onUnavailable: (() -> Unit)? = null,
+        callback: (BridgeEvent?) -> Unit,
+    ) {
+        pending[id] = Pending(callback, onUnavailable)
     }
 
-    @Synchronized
     fun deliver(id: String, event: BridgeEvent?) {
-        pending.remove(id)?.invoke(event)
+        take(id)?.onClose?.invoke(event)
     }
+
+    /** Показ сорвался. One-shot общий с [deliver]: что пришло первым, то и отдано. */
+    fun deliverUnavailable(id: String) {
+        val entry = take(id) ?: return
+        val onUnavailable = entry.onUnavailable
+        if (onUnavailable != null) onUnavailable() else entry.onClose(null)
+    }
+
+    // Колбэк зовётся ВНЕ замка — как и раньше, достаётся под замком ровно один раз.
+    @Synchronized
+    private fun take(id: String): Pending? = pending.remove(id)
 }
