@@ -13,7 +13,8 @@ sealed class QuizResult {
     data class Closed(val reason: QuizCloseReason) : QuizResult()
 
     /**
-     * Квиз НЕ был показан: SDK не сконфигурирован ([Web2AppSdk.configure]).
+     * Квиз НЕ был показан: SDK не сконфигурирован ([Web2AppSdk.configure]) либо
+     * (0.7.2) показ сорвался — процесс страницы WebView упал два раза подряд или шесть раз за показ (выгрузка системой в фоне не считается).
      * Отличается от [Closed] — там экран показали. Паритет [PaywallResult.Unavailable].
      */
     object Unavailable : QuizResult()
