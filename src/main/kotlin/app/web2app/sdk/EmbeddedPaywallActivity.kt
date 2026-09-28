@@ -348,7 +348,7 @@ internal object EmbeddedPaywallCallbacks {
     private val pending = mutableMapOf<String, Pending>()
 
     /**
-     * [onUnavailable] — 0.7.2: показ сорвался (процесс страницы погиб дважды).
+     * [onUnavailable] — 0.7.2: показ сорвался (процесс страницы упал два раза подряд).
      * Не задан → такой срыв отдаётся как обычное нативное закрытие (`null`).
      */
     @Synchronized

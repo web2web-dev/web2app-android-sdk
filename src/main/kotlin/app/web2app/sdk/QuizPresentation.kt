@@ -56,7 +56,7 @@ internal object QuizPresentation {
      * публичного метода).
      */
     fun registerCloseCallback(callbackId: String, deliver: (QuizResult) -> Unit) {
-        // 0.7.2: показ сорвался (процесс страницы погиб дважды) — квиз не показан.
+        // 0.7.2: показ сорвался (процесс страницы упал два раза подряд) — квиз не показан.
         EmbeddedPaywallCallbacks.register(
             callbackId,
             onUnavailable = { deliver(QuizResult.Unavailable) },

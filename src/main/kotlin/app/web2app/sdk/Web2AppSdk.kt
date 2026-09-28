@@ -32,13 +32,13 @@ object Web2AppSdk {
     /** WEB-1384: метка первой неудачной попытки отпечатка (окно 2 часа). */
     private var fingerprintGate: FingerprintAttemptGate? = null
 
+    /** 0.7.2: «id пейволла → адрес» на час для встроенного показа по id. */
+    private val paywallUrlCache = PaywallUrlCache()
+
     /**
      * Слушатель событий воронки ([setFunnelEventListener]). `@Volatile` —
      * пишется с потока интегратора, читается с потока JavascriptInterface.
      */
-    /** 0.7.2: «id пейволла → адрес» на час для встроенного показа по id. */
-    private val paywallUrlCache = PaywallUrlCache()
-
     @Volatile
     private var funnelEventListener: ((String, FunnelEventData) -> Unit)? = null
 
@@ -481,7 +481,7 @@ object Web2AppSdk {
         )
         val client = EntitlementClient(cfg)
         val callbackId = UUID.randomUUID().toString()
-        // 0.7.2: показ сорвался (процесс страницы погиб дважды подряд). Оплата могла
+        // 0.7.2: показ сорвался (процесс страницы упал два раза подряд). Оплата могла
         // пройти до сбоя — поллим тем же окном, что и нативное закрытие; нет права →
         // Unavailable (пользователь ничего не отклонял, это не NotPaid).
         val onBrokenShow: () -> Unit = {
