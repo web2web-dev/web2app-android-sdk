@@ -227,6 +227,39 @@ class EmbeddedWebViewPolicyTest {
         assertFalse(EmbeddedWebViewPolicy.shouldResetCrashesInARow(mainFrameLoadFailed = true))
     }
 
+    // ── Флаг ошибки главного кадра: живёт ровно до конца своей загрузки ─────
+
+    @Test
+    fun modernOrderErrorThenStartedThenFinishedDoesNotReset() {
+        // Современный WebView: ошибка → onPageStarted (страница ошибки) → onPageFinished.
+        // У трекера нет входа для onPageStarted вовсе — сбросить флаг раньше времени нечем.
+        val t = MainFrameLoadTracker()
+        t.onLoadStartedBySdk()
+        t.onMainFrameError()
+        assertFalse(t.onPageFinished())
+    }
+
+    @Test
+    fun successfulLoadAfterFailedOneResets() {
+        // Ошибка этой загрузки → не сброс; следующая (в т.ч. переход по ссылке внутри
+        // страницы, без участия SDK) успешная → сброс: флаг не залипает навсегда.
+        val t = MainFrameLoadTracker()
+        t.onLoadStartedBySdk()
+        t.onMainFrameError()
+        assertFalse(t.onPageFinished())
+        assertTrue(t.onPageFinished())
+    }
+
+    @Test
+    fun sdkLoadStartClearsStaleFlag() {
+        // Ошибка без onPageFinished (WebView погиб посреди загрузки) → новая загрузка SDK
+        // начинается с чистого листа.
+        val t = MainFrameLoadTracker()
+        t.onMainFrameError()
+        t.onLoadStartedBySdk()
+        assertTrue(t.onPageFinished())
+    }
+
     @Test
     fun rendererPriorityNamesMatchWebViewConstants() {
         // WebView.RENDERER_PRIORITY_WAIVED = 0, BOUND = 1, IMPORTANT = 2 (API 26).

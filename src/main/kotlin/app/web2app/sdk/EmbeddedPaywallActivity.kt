@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
@@ -71,11 +70,11 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     private var renderProcessCrashesTotal = 0
 
     /**
-     * Для текущей загрузки главного кадра была ошибка (`onReceivedError`). Сбрасывается
-     * в начале каждой загрузки (`onPageStarted`) и при новом WebView; читается в
-     * `onPageFinished` — сбрасывать ли счётчик «подряд».
+     * Была ли ошибка главного кадра у текущей загрузки (`onReceivedError`); читается
+     * в `onPageFinished` — сбрасывать ли счётчик «подряд». Где флаг снимается и
+     * почему не в `onPageStarted` — см. [MainFrameLoadTracker].
      */
-    private var mainFrameLoadFailed = false
+    private val mainFrameLoad = MainFrameLoadTracker()
 
     /** Экран на переднем плане (между `onResume` и `onPause`). */
     private var isInForeground = false
@@ -158,7 +157,7 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
             addJavascriptInterface(Bridge(), "web2appBridge")
         }
         webView = view
-        mainFrameLoadFailed = false
+        mainFrameLoad.onLoadStartedBySdk()
         root.addView(
             view,
             0,
@@ -176,7 +175,10 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
         isInForeground = true
         if (reloadOnResume) {
             reloadOnResume = false
-            webView?.loadUrl(pageUrl)
+            webView?.let {
+                mainFrameLoad.onLoadStartedBySdk()
+                it.loadUrl(pageUrl)
+            }
         }
     }
 
@@ -209,7 +211,10 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
         )
         root.removeView(view)
         view.destroy()
-        if (webView === view) webView = null
+        // Погиб не текущий WebView (старый, уже заменённый) — текущий жив, новый не
+        // создаём и в лимиты не считаем.
+        if (view !== webView) return
+        webView = null
         // Экран уже закрывается — пересоздавать нечего, колбэк отдаст onDestroy.
         if (isFinishing || isDestroyed) return
 
@@ -291,19 +296,14 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     }
 
     private inner class PageClient : WebViewClient() {
-        override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-            if (view !== webView) return
-            // Новая загрузка главного кадра — ошибка прошлой к ней не относится.
-            mainFrameLoadFailed = false
-        }
-
         override fun onPageFinished(view: WebView, url: String?) {
             if (view !== webView) return
             loadingIndicator.visibility = View.GONE
             // Страница догрузилась без ошибки главного кадра — прежние падения
             // больше не «подряд». После ошибки onPageFinished тоже приходит, но
             // страницы нет — счётчик не трогаем. Общий счётчик за показ — никогда.
-            if (EmbeddedWebViewPolicy.shouldResetCrashesInARow(mainFrameLoadFailed)) {
+            // Флаг ошибки снимается здесь же, после решения (MainFrameLoadTracker).
+            if (mainFrameLoad.onPageFinished()) {
                 renderProcessCrashesInARow = 0
             }
         }
@@ -316,7 +316,7 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
             if (view !== webView) return
             if (!EmbeddedWebViewPolicy.reactsToLoadError(request.isForMainFrame)) return
-            mainFrameLoadFailed = true
+            mainFrameLoad.onMainFrameError()
             loadingIndicator.visibility = View.GONE
             SdkLogger.error(
                 "paywall.webview_load_failed",

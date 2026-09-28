@@ -144,3 +144,35 @@ internal enum class RenderProcessGoneAction {
     /** Закрыть показ с результатом «недоступно». */
     GIVE_UP,
 }
+
+/**
+ * 0.7.2 — была ли ошибка главного кадра у ТЕКУЩЕЙ загрузки (решает, сбрасывать ли
+ * счётчик падений «подряд» в `onPageFinished`).
+ *
+ * Флаг НЕ снимается в `onPageStarted`: у современного WebView при ошибке главного
+ * кадра порядок бывает «ошибка → onPageStarted (страница ошибки) → onPageFinished»,
+ * и сброс в начале загрузки стёр бы ошибку раньше времени. Снимается:
+ * - когда загрузку запускает сам SDK ([onLoadStartedBySdk]: новый WebView, отложенная
+ *   загрузка при возврате на экран);
+ * - в конце загрузки ([onPageFinished]) — ПОСЛЕ решения о сбросе счётчика. Так флаг
+ *   живёт ровно до конца той загрузки, в которой случилась ошибка, и переход по
+ *   ссылке внутри страницы (новая загрузка без участия SDK) начинается с чистого листа.
+ */
+internal class MainFrameLoadTracker {
+    private var mainFrameLoadFailed = false
+
+    fun onLoadStartedBySdk() {
+        mainFrameLoadFailed = false
+    }
+
+    fun onMainFrameError() {
+        mainFrameLoadFailed = true
+    }
+
+    /** `true` — сбросить счётчик падений «подряд». Флаг после вызова снят. */
+    fun onPageFinished(): Boolean {
+        val reset = EmbeddedWebViewPolicy.shouldResetCrashesInARow(mainFrameLoadFailed)
+        mainFrameLoadFailed = false
+        return reset
+    }
+}

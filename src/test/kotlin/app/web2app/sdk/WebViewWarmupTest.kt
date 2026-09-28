@@ -1,7 +1,9 @@
 package app.web2app.sdk
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -50,5 +52,17 @@ class WebViewWarmupTest {
             "disabled_by_config",
             WebViewWarmup.skipReason(enabledByConfig = false, processName = "$pkg:push", packageName = pkg),
         )
+    }
+
+    @Test
+    fun disabledByConfigDoesNotMarkWarmedUp() {
+        // Выключен интегратором — следующий configure с включённым прогревом его сделает.
+        assertFalse(WebViewWarmup.marksWarmedUp(WebViewWarmup.SKIP_DISABLED_BY_CONFIG))
+    }
+
+    @Test
+    fun warmedOrNotMainProcessMarksWarmedUp() {
+        assertTrue(WebViewWarmup.marksWarmedUp(null))
+        assertTrue(WebViewWarmup.marksWarmedUp(WebViewWarmup.SKIP_NOT_MAIN_PROCESS))
     }
 }

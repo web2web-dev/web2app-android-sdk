@@ -30,18 +30,18 @@ internal object WebViewWarmup {
     @Volatile
     private var started = false
 
-    /** [enabled] — `warmUpWebView` из [Web2AppSdk.configure]; `false` — не греть вовсе. */
+    /**
+     * [enabled] — `warmUpWebView` из [Web2AppSdk.configure]; `false` — не греть вовсе.
+     * Решение о пропуске целиком в [skipReason] (выключатель там же), здесь — только
+     * исполнение.
+     */
+    @Synchronized
     fun warmUp(context: Context, enabled: Boolean = true) {
-        if (!enabled) {
-            // Флаг «уже грели» не ставим: следующий configure с включённым прогревом его сделает.
-            SdkLogger.log("paywall.webview_warmup_skipped", context = mapOf("reason" to SKIP_DISABLED_BY_CONFIG))
-            return
-        }
         if (started) return
-        started = true
         val appContext = context.applicationContext ?: context
         val processName = runCatching { currentProcessName(appContext) }.getOrNull()
-        val skip = skipReason(enabledByConfig = true, processName = processName, packageName = appContext.packageName)
+        val skip = skipReason(enabledByConfig = enabled, processName = processName, packageName = appContext.packageName)
+        if (marksWarmedUp(skip)) started = true
         if (skip != null) {
             SdkLogger.log("paywall.webview_warmup_skipped", context = mapOf("reason" to skip))
             return
@@ -68,6 +68,13 @@ internal object WebViewWarmup {
         !shouldWarmUp(processName, packageName) -> SKIP_NOT_MAIN_PROCESS
         else -> null
     }
+
+    /**
+     * Ставить ли отметку «уже грели» после решения [skipReason]. При выключенном
+     * прогреве — нет: следующий configure с включённым прогревом его сделает. Прогрели
+     * или процесс не основной — да (второй раз решать нечего).
+     */
+    fun marksWarmedUp(skipReason: String?): Boolean = skipReason != SKIP_DISABLED_BY_CONFIG
 
     const val SKIP_NOT_MAIN_PROCESS = "not_main_process"
     const val SKIP_DISABLED_BY_CONFIG = "disabled_by_config"
