@@ -42,8 +42,18 @@ object Web2AppSdk {
     @Volatile
     private var funnelEventListener: ((String, FunnelEventData) -> Unit)? = null
 
-    /** Инициализация. [projectId] = ключ проекта арендатора; [baseUrl] = наш API. */
-    fun configure(context: Context, projectId: String, baseUrl: String) {
+    /**
+     * Инициализация. [projectId] = ключ проекта арендатора; [baseUrl] = наш API.
+     *
+     * [warmUpWebView] (0.7.2, по умолчанию `true`) — прогреть движок WebView на
+     * главном потоке, чтобы первый встроенный показ не ждал его загрузки (стоит
+     * сотни миллисекунд главного потока при запуске). `false` — не греть,
+     * в журнал `paywall.webview_warmup_skipped` с причиной `disabled_by_config`.
+     * Если приложение зовёт `WebView.setDataDirectorySuffix`, это нужно сделать
+     * ДО `configure`: после прогрева движок уже поднят и вызов бросит исключение.
+     */
+    @JvmOverloads
+    fun configure(context: Context, projectId: String, baseUrl: String, warmUpWebView: Boolean = true) {
         val cfg = Web2AppConfig(projectId, baseUrl.trimEnd('/'))
         config = cfg
         guidStore = GuidStore(context.applicationContext)
@@ -57,7 +67,7 @@ object Web2AppSdk {
         // 0.7.2: мог смениться проект/сервер — адреса прежнего не годятся.
         paywallUrlCache.clear()
         // 0.7.2: прогрев движка WebView — первый встроенный показ не платит за его загрузку.
-        WebViewWarmup.warmUp(context)
+        WebViewWarmup.warmUp(context, enabled = warmUpWebView)
     }
 
     /**

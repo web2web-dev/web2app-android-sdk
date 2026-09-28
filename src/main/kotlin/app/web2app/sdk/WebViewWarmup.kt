@@ -21,18 +21,29 @@ import android.webkit.WebSettings
  * поднятый во вспомогательном процессе, может занять каталог данных WebView, и
  * тогда WebView основного процесса упадёт («один каталог данных — один процесс»,
  * Android 9+). Прогрев того не стоит.
+ *
+ * Выключается интегратором: `Web2AppSdk.configure(..., warmUpWebView = false)`
+ * (прогрев занимает главный поток на сотни миллисекунд при запуске) — тогда
+ * `paywall.webview_warmup_skipped` с причиной `disabled_by_config`.
  */
 internal object WebViewWarmup {
     @Volatile
     private var started = false
 
-    fun warmUp(context: Context) {
+    /** [enabled] — `warmUpWebView` из [Web2AppSdk.configure]; `false` — не греть вовсе. */
+    fun warmUp(context: Context, enabled: Boolean = true) {
+        if (!enabled) {
+            // Флаг «уже грели» не ставим: следующий configure с включённым прогревом его сделает.
+            SdkLogger.log("paywall.webview_warmup_skipped", context = mapOf("reason" to SKIP_DISABLED_BY_CONFIG))
+            return
+        }
         if (started) return
         started = true
         val appContext = context.applicationContext ?: context
         val processName = runCatching { currentProcessName(appContext) }.getOrNull()
-        if (!shouldWarmUp(processName, appContext.packageName)) {
-            SdkLogger.log("paywall.webview_warmup_skipped", context = mapOf("reason" to "not_main_process"))
+        val skip = skipReason(enabledByConfig = true, processName = processName, packageName = appContext.packageName)
+        if (skip != null) {
+            SdkLogger.log("paywall.webview_warmup_skipped", context = mapOf("reason" to skip))
             return
         }
         Handler(Looper.getMainLooper()).post {
@@ -46,6 +57,20 @@ internal object WebViewWarmup {
             }
         }
     }
+
+    /**
+     * Причина НЕ прогревать движок (для `paywall.webview_warmup_skipped`) или
+     * `null` — греть. Выключатель интегратора ([enabledByConfig] = `warmUpWebView`
+     * в [Web2AppSdk.configure]) проверяется первым, затем — основной ли процесс.
+     */
+    fun skipReason(enabledByConfig: Boolean, processName: String?, packageName: String?): String? = when {
+        !enabledByConfig -> SKIP_DISABLED_BY_CONFIG
+        !shouldWarmUp(processName, packageName) -> SKIP_NOT_MAIN_PROCESS
+        else -> null
+    }
+
+    const val SKIP_NOT_MAIN_PROCESS = "not_main_process"
+    const val SKIP_DISABLED_BY_CONFIG = "disabled_by_config"
 
     /** Греть ли движок: только в основном процессе (имя процесса = имя пакета). */
     fun shouldWarmUp(processName: String?, packageName: String?): Boolean =
