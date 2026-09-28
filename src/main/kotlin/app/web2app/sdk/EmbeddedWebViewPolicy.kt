@@ -26,32 +26,67 @@ internal object EmbeddedWebViewPolicy {
      * Сколько настоящих падений процесса страницы ПОДРЯД переживает один показ.
      * Ровно одно: второе подряд — страница не жилец, закрываем показ (без предела
      * страница, роняющая рендерер, крутилась бы бесконечно). «Подряд» — счётчик
-     * сбрасывается, когда главный кадр страницы догрузился (`onPageFinished`).
+     * сбрасывается, когда главный кадр страницы догрузился без ошибки
+     * (`onPageFinished`, см. [shouldResetCrashesInARow]). Поверх — общий потолок
+     * за показ [MAX_RENDER_CRASHES_PER_SHOW].
      */
     const val MAX_WEBVIEW_RECREATIONS = 1
+
+    /**
+     * Общий потолок настоящих падений процесса страницы за один показ (за жизнь
+     * Activity) — не сбрасывается никогда. Шестое падение закрывает показ, даже
+     * если между падениями страница каждый раз догружалась: иначе круг
+     * «загрузилась → упала → перезагрузка» крутился бы бесконечно.
+     */
+    const val MAX_RENDER_CRASHES_PER_SHOW = 5
 
     /**
      * Что делать, когда процесс страницы погиб.
      *
      * [didCrash] — `RenderProcessGoneDetail.didCrash()`: `true` — настоящее падение
-     * (идёт в лимит), `false` — система выгрузила процесс ради памяти (обычно
-     * приложение в фоне, человек ушёл платить в банк) — это не срыв показа и в
-     * лимит не идёт никогда.
+     * (идёт в оба лимита), `false` — система выгрузила процесс ради памяти (обычно
+     * приложение в фоне, человек ушёл платить в банк) — это не срыв показа и ни в
+     * один лимит не идёт никогда.
      *
      * [isResumed] — экран на переднем плане: загрузка сразу; иначе — отложить до
      * возврата на экран (грузить страницу в фоне незачем, система её снова выгрузит).
      *
      * [crashesInARow] — сколько настоящих падений подряд было до этой гибели;
-     * в ответе — сколько стало.
+     * [totalCrashes] — сколько настоящих падений было за весь показ до неё.
+     * В ответе — сколько стало. Если сработали оба лимита сразу, причина
+     * закрытия — общий потолок.
      */
-    fun renderProcessGoneDecision(didCrash: Boolean, isResumed: Boolean, crashesInARow: Int): RenderProcessGoneDecision {
-        if (didCrash && crashesInARow >= MAX_WEBVIEW_RECREATIONS) {
-            return RenderProcessGoneDecision(RenderProcessGoneAction.GIVE_UP, crashesInARow + 1)
+    fun renderProcessGoneDecision(
+        didCrash: Boolean,
+        isResumed: Boolean,
+        crashesInARow: Int,
+        totalCrashes: Int,
+    ): RenderProcessGoneDecision {
+        if (!didCrash) {
+            val action = if (isResumed) RenderProcessGoneAction.RELOAD_NOW else RenderProcessGoneAction.RELOAD_ON_RESUME
+            return RenderProcessGoneDecision(action, crashesInARow, totalCrashes, giveUpReason = null)
         }
-        val crashesAfter = if (didCrash) crashesInARow + 1 else crashesInARow
-        val action = if (isResumed) RenderProcessGoneAction.RELOAD_NOW else RenderProcessGoneAction.RELOAD_ON_RESUME
-        return RenderProcessGoneDecision(action, crashesAfter)
+        val inARowAfter = crashesInARow + 1
+        val totalAfter = totalCrashes + 1
+        val giveUpReason = when {
+            totalCrashes >= MAX_RENDER_CRASHES_PER_SHOW -> GiveUpReason.CRASHES_PER_SHOW
+            crashesInARow >= MAX_WEBVIEW_RECREATIONS -> GiveUpReason.CRASHES_IN_A_ROW
+            else -> null
+        }
+        val action = when {
+            giveUpReason != null -> RenderProcessGoneAction.GIVE_UP
+            isResumed -> RenderProcessGoneAction.RELOAD_NOW
+            else -> RenderProcessGoneAction.RELOAD_ON_RESUME
+        }
+        return RenderProcessGoneDecision(action, inARowAfter, totalAfter, giveUpReason)
     }
+
+    /**
+     * Сбрасывать ли счётчик падений «подряд» в `onPageFinished`. Этот колбэк
+     * приходит и после ошибки загрузки главного кадра (нет сети, таймаут) —
+     * тогда страница НЕ загрузилась, и прежние падения остаются «подряд».
+     */
+    fun shouldResetCrashesInARow(mainFrameLoadFailed: Boolean): Boolean = !mainFrameLoadFailed
 
     /** Приоритет рендерера на момент гибели — именем для журнала (константы WebView API 26). */
     fun rendererPriorityName(priority: Int): String = when (priority) {
@@ -79,8 +114,25 @@ internal object EmbeddedWebViewPolicy {
     fun reactsToLoadError(isForMainFrame: Boolean): Boolean = isForMainFrame
 }
 
-/** Решение по гибели процесса страницы: действие и счётчик падений подряд после неё. */
-internal data class RenderProcessGoneDecision(val action: RenderProcessGoneAction, val crashesInARow: Int)
+/**
+ * Решение по гибели процесса страницы: действие, счётчики падений (подряд и за
+ * показ) после неё и причина закрытия (только у [RenderProcessGoneAction.GIVE_UP]).
+ */
+internal data class RenderProcessGoneDecision(
+    val action: RenderProcessGoneAction,
+    val crashesInARow: Int,
+    val totalCrashes: Int,
+    val giveUpReason: GiveUpReason?,
+)
+
+/** Почему показ закрыт из-за падений процесса страницы. */
+internal enum class GiveUpReason {
+    /** Два падения подряд — журнал `paywall.webview_process_terminated_twice`. */
+    CRASHES_IN_A_ROW,
+
+    /** Шестое падение за показ — журнал `paywall.webview_process_crash_limit`. */
+    CRASHES_PER_SHOW,
+}
 
 internal enum class RenderProcessGoneAction {
     /** Новый WebView уже поставлен — загрузить адрес сразу (экран на переднем плане). */

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
@@ -57,9 +58,24 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
 
     /**
      * 0.7.2: сколько НАСТОЯЩИХ падений процесса страницы было подряд (выгрузка
-     * системой не считается). Сбрасывается, когда главный кадр догрузился.
+     * системой не считается). Сбрасывается, когда главный кадр догрузился без
+     * ошибки.
      */
     private var renderProcessCrashesInARow = 0
+
+    /**
+     * 0.7.2: сколько настоящих падений процесса страницы было за весь показ (за
+     * жизнь Activity). Не сбрасывается никогда — потолок
+     * [EmbeddedWebViewPolicy.MAX_RENDER_CRASHES_PER_SHOW].
+     */
+    private var renderProcessCrashesTotal = 0
+
+    /**
+     * Для текущей загрузки главного кадра была ошибка (`onReceivedError`). Сбрасывается
+     * в начале каждой загрузки (`onPageStarted`) и при новом WebView; читается в
+     * `onPageFinished` — сбрасывать ли счётчик «подряд».
+     */
+    private var mainFrameLoadFailed = false
 
     /** Экран на переднем плане (между `onResume` и `onPause`). */
     private var isInForeground = false
@@ -142,6 +158,7 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
             addJavascriptInterface(Bridge(), "web2appBridge")
         }
         webView = view
+        mainFrameLoadFailed = false
         root.addView(
             view,
             0,
@@ -172,8 +189,8 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
      * 0.7.2 — гибель процесса страницы (рендерера Chromium). Без обработки система
      * роняет ВСЁ приложение интегратора. Погибший WebView больше не годен: убираем
      * его из иерархии и уничтожаем, сразу ставим новый. Настоящее падение
-     * (`didCrash`) идёт в лимит: второе подряд — закрываем показ с результатом
-     * «недоступно». Выгрузка системой ради памяти (`didCrash=false`, обычно в фоне,
+     * (`didCrash`) идёт в лимиты: второе подряд или шестое за показ — закрываем
+     * показ с результатом «недоступно». Выгрузка системой ради памяти (`didCrash=false`, обычно в фоне,
      * пока человек платит в банке) — не срыв, в лимит не идёт. Экран в фоне —
      * страница грузится при возврате на экран, а не сразу.
      */
@@ -200,8 +217,10 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
             didCrash = didCrash,
             isResumed = isInForeground,
             crashesInARow = renderProcessCrashesInARow,
+            totalCrashes = renderProcessCrashesTotal,
         )
         renderProcessCrashesInARow = decision.crashesInARow
+        renderProcessCrashesTotal = decision.totalCrashes
         when (decision.action) {
             RenderProcessGoneAction.RELOAD_NOW -> {
                 reloadOnResume = false
@@ -212,7 +231,14 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
                 attachNewWebView(loadNow = false)
             }
             RenderProcessGoneAction.GIVE_UP -> {
-                SdkLogger.error("paywall.webview_process_terminated_twice")
+                if (decision.giveUpReason == GiveUpReason.CRASHES_PER_SHOW) {
+                    SdkLogger.error(
+                        "paywall.webview_process_crash_limit",
+                        context = mapOf("total" to decision.totalCrashes.toString()),
+                    )
+                } else {
+                    SdkLogger.error("paywall.webview_process_terminated_twice")
+                }
                 deliverUnavailable()
                 finish()
             }
@@ -265,11 +291,21 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     }
 
     private inner class PageClient : WebViewClient() {
+        override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+            if (view !== webView) return
+            // Новая загрузка главного кадра — ошибка прошлой к ней не относится.
+            mainFrameLoadFailed = false
+        }
+
         override fun onPageFinished(view: WebView, url: String?) {
             if (view !== webView) return
             loadingIndicator.visibility = View.GONE
-            // Страница догрузилась — прежние падения больше не «подряд».
-            renderProcessCrashesInARow = 0
+            // Страница догрузилась без ошибки главного кадра — прежние падения
+            // больше не «подряд». После ошибки onPageFinished тоже приходит, но
+            // страницы нет — счётчик не трогаем. Общий счётчик за показ — никогда.
+            if (EmbeddedWebViewPolicy.shouldResetCrashesInARow(mainFrameLoadFailed)) {
+                renderProcessCrashesInARow = 0
+            }
         }
 
         /**
@@ -280,6 +316,7 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
             if (view !== webView) return
             if (!EmbeddedWebViewPolicy.reactsToLoadError(request.isForMainFrame)) return
+            mainFrameLoadFailed = true
             loadingIndicator.visibility = View.GONE
             SdkLogger.error(
                 "paywall.webview_load_failed",
@@ -348,7 +385,8 @@ internal object EmbeddedPaywallCallbacks {
     private val pending = mutableMapOf<String, Pending>()
 
     /**
-     * [onUnavailable] — 0.7.2: показ сорвался (процесс страницы упал два раза подряд).
+     * [onUnavailable] — 0.7.2: показ сорвался (процесс страницы упал два раза подряд
+     * или шесть раз за показ).
      * Не задан → такой срыв отдаётся как обычное нативное закрытие (`null`).
      */
     @Synchronized
