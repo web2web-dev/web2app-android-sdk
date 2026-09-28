@@ -55,8 +55,20 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     /** Текущий WebView (после гибели процесса страницы — уже новый). */
     private var webView: WebView? = null
 
-    /** 0.7.2: сколько раз за этот показ погибал процесс страницы. */
-    private var renderProcessTerminations = 0
+    /**
+     * 0.7.2: сколько НАСТОЯЩИХ падений процесса страницы было подряд (выгрузка
+     * системой не считается). Сбрасывается, когда главный кадр догрузился.
+     */
+    private var renderProcessCrashesInARow = 0
+
+    /** Экран на переднем плане (между `onResume` и `onPause`). */
+    private var isInForeground = false
+
+    /**
+     * Процесс страницы погиб, пока экран был не на переднем плане: новый WebView
+     * уже стоит, адрес загрузится в [onResume].
+     */
+    private var reloadOnResume = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -117,11 +129,12 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
     }
 
     /**
-     * Создаёт WebView, кладёт его НИЖНИМ слоем (крестик остаётся поверх) и грузит
-     * [pageUrl]. Зовётся при старте показа и один раз после гибели процесса страницы.
+     * Создаёт WebView, кладёт его НИЖНИМ слоем (крестик остаётся поверх) и, если
+     * [loadNow], грузит [pageUrl]. Зовётся при старте показа и после гибели процесса
+     * страницы (тогда при экране в фоне загрузка откладывается до [onResume]).
      */
     @SuppressLint("SetJavaScriptEnabled")
-    private fun attachNewWebView() {
+    private fun attachNewWebView(loadNow: Boolean = true) {
         val view = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -138,23 +151,43 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
             ),
         )
         loadingIndicator.visibility = View.VISIBLE
-        view.loadUrl(pageUrl)
+        if (loadNow) view.loadUrl(pageUrl)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isInForeground = true
+        if (reloadOnResume) {
+            reloadOnResume = false
+            webView?.loadUrl(pageUrl)
+        }
+    }
+
+    override fun onPause() {
+        isInForeground = false
+        super.onPause()
     }
 
     /**
      * 0.7.2 — гибель процесса страницы (рендерера Chromium). Без обработки система
      * роняет ВСЁ приложение интегратора. Погибший WebView больше не годен: убираем
-     * его из иерархии и уничтожаем; первый раз за показ — новый WebView и загрузка
-     * заново, второй — закрываем показ с результатом «недоступно».
+     * его из иерархии и уничтожаем, сразу ставим новый. Настоящее падение
+     * (`didCrash`) идёт в лимит: второе подряд — закрываем показ с результатом
+     * «недоступно». Выгрузка системой ради памяти (`didCrash=false`, обычно в фоне,
+     * пока человек платит в банке) — не срыв, в лимит не идёт. Экран в фоне —
+     * страница грузится при возврате на экран, а не сразу.
      */
     @RequiresApi(Build.VERSION_CODES.O)
     private fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail) {
-        SdkLogger.error(
-            "paywall.webview_process_terminated",
+        val didCrash = detail.didCrash()
+        SdkLogger.log(
+            if (didCrash) "paywall.webview_process_terminated" else "paywall.webview_process_reclaimed",
+            level = if (didCrash) "error" else "info",
             context = mapOf(
-                "didCrash" to detail.didCrash().toString(),
+                "didCrash" to didCrash.toString(),
                 "rendererPriorityAtExit" to
                     EmbeddedWebViewPolicy.rendererPriorityName(detail.rendererPriorityAtExit()),
+                "inForeground" to isInForeground.toString(),
             ),
         )
         root.removeView(view)
@@ -163,10 +196,21 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
         // Экран уже закрывается — пересоздавать нечего, колбэк отдаст onDestroy.
         if (isFinishing || isDestroyed) return
 
-        val action = EmbeddedWebViewPolicy.renderProcessGoneAction(renderProcessTerminations)
-        renderProcessTerminations++
-        when (action) {
-            RenderProcessGoneAction.RECREATE -> attachNewWebView()
+        val decision = EmbeddedWebViewPolicy.renderProcessGoneDecision(
+            didCrash = didCrash,
+            isResumed = isInForeground,
+            crashesInARow = renderProcessCrashesInARow,
+        )
+        renderProcessCrashesInARow = decision.crashesInARow
+        when (decision.action) {
+            RenderProcessGoneAction.RELOAD_NOW -> {
+                reloadOnResume = false
+                attachNewWebView(loadNow = true)
+            }
+            RenderProcessGoneAction.RELOAD_ON_RESUME -> {
+                reloadOnResume = true
+                attachNewWebView(loadNow = false)
+            }
             RenderProcessGoneAction.GIVE_UP -> {
                 SdkLogger.error("paywall.webview_process_terminated_twice")
                 deliverUnavailable()
@@ -222,7 +266,10 @@ internal class EmbeddedPaywallActivity : Activity(), EmbeddedPaywallPresentation
 
     private inner class PageClient : WebViewClient() {
         override fun onPageFinished(view: WebView, url: String?) {
-            if (view === webView) loadingIndicator.visibility = View.GONE
+            if (view !== webView) return
+            loadingIndicator.visibility = View.GONE
+            // Страница догрузилась — прежние падения больше не «подряд».
+            renderProcessCrashesInARow = 0
         }
 
         /**

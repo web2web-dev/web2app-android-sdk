@@ -57,20 +57,86 @@ class EmbeddedWebViewPolicyTest {
 
     // ── Гибель процесса страницы ────────────────────────────────────────────
 
+    // Таблица: (didCrash, isResumed, падений подряд до этой гибели) → (действие, падений подряд после).
+    private fun decide(didCrash: Boolean, isResumed: Boolean, crashesInARow: Int) =
+        EmbeddedWebViewPolicy.renderProcessGoneDecision(didCrash, isResumed, crashesInARow)
+
     @Test
-    fun firstRendererDeathRecreatesWebView() {
-        assertEquals(RenderProcessGoneAction.RECREATE, EmbeddedWebViewPolicy.renderProcessGoneAction(0))
+    fun firstCrashOnScreenReloadsNowAndCounts() {
+        assertEquals(
+            RenderProcessGoneDecision(RenderProcessGoneAction.RELOAD_NOW, crashesInARow = 1),
+            decide(didCrash = true, isResumed = true, crashesInARow = 0),
+        )
     }
 
     @Test
-    fun secondRendererDeathGivesUp() {
-        assertEquals(RenderProcessGoneAction.GIVE_UP, EmbeddedWebViewPolicy.renderProcessGoneAction(1))
+    fun firstCrashInBackgroundReloadsOnResumeAndCounts() {
+        assertEquals(
+            RenderProcessGoneDecision(RenderProcessGoneAction.RELOAD_ON_RESUME, crashesInARow = 1),
+            decide(didCrash = true, isResumed = false, crashesInARow = 0),
+        )
     }
 
     @Test
-    fun furtherRendererDeathsKeepGivingUp() {
-        // Не бесконечно: сколько бы ни было гибелей после первой — только закрытие.
-        assertEquals(RenderProcessGoneAction.GIVE_UP, EmbeddedWebViewPolicy.renderProcessGoneAction(5))
+    fun secondCrashInARowGivesUp() {
+        assertEquals(
+            RenderProcessGoneDecision(RenderProcessGoneAction.GIVE_UP, crashesInARow = 2),
+            decide(didCrash = true, isResumed = true, crashesInARow = 1),
+        )
+    }
+
+    @Test
+    fun secondCrashInARowGivesUpEvenInBackground() {
+        assertEquals(
+            RenderProcessGoneAction.GIVE_UP,
+            decide(didCrash = true, isResumed = false, crashesInARow = 1).action,
+        )
+    }
+
+    @Test
+    fun furtherCrashesKeepGivingUp() {
+        // Не бесконечно: сколько бы ни было падений подряд после первого — только закрытие.
+        assertEquals(RenderProcessGoneAction.GIVE_UP, decide(didCrash = true, isResumed = true, crashesInARow = 5).action)
+    }
+
+    @Test
+    fun systemReclaimInBackgroundIsNotCountedAndWaitsForResume() {
+        // Человек ушёл платить в банк, система выгрузила страницу — это не срыв показа.
+        assertEquals(
+            RenderProcessGoneDecision(RenderProcessGoneAction.RELOAD_ON_RESUME, crashesInARow = 1),
+            decide(didCrash = false, isResumed = false, crashesInARow = 1),
+        )
+    }
+
+    @Test
+    fun systemReclaimOnScreenIsNotCountedAndReloadsNow() {
+        assertEquals(
+            RenderProcessGoneDecision(RenderProcessGoneAction.RELOAD_NOW, crashesInARow = 0),
+            decide(didCrash = false, isResumed = true, crashesInARow = 0),
+        )
+    }
+
+    @Test
+    fun repeatedSystemReclaimsNeverGiveUp() {
+        var crashes = 0
+        repeat(5) {
+            val d = decide(didCrash = false, isResumed = false, crashesInARow = crashes)
+            assertEquals(RenderProcessGoneAction.RELOAD_ON_RESUME, d.action)
+            crashes = d.crashesInARow
+        }
+        assertEquals(0, crashes)
+    }
+
+    @Test
+    fun reclaimBetweenTwoCrashesDoesNotResetButDoesNotCount() {
+        // Падение → выгрузка системой → падение: выгрузка счётчик не трогает, второе падение — закрытие.
+        val afterCrash = decide(didCrash = true, isResumed = true, crashesInARow = 0)
+        val afterReclaim = decide(didCrash = false, isResumed = false, crashesInARow = afterCrash.crashesInARow)
+        assertEquals(1, afterReclaim.crashesInARow)
+        assertEquals(
+            RenderProcessGoneAction.GIVE_UP,
+            decide(didCrash = true, isResumed = true, crashesInARow = afterReclaim.crashesInARow).action,
+        )
     }
 
     @Test

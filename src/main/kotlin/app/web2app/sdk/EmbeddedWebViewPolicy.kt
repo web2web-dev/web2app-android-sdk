@@ -23,16 +23,35 @@ internal object EmbeddedWebViewPolicy {
         isFinishing || !isChangingConfigurations
 
     /**
-     * Сколько раз за один показ можно пересоздать WebView после гибели процесса
-     * страницы. Ровно один: второй подряд — страница не жилец, закрываем показ
-     * (без предела страница, убивающая рендерер, крутилась бы бесконечно).
+     * Сколько настоящих падений процесса страницы ПОДРЯД переживает один показ.
+     * Ровно одно: второе подряд — страница не жилец, закрываем показ (без предела
+     * страница, роняющая рендерер, крутилась бы бесконечно). «Подряд» — счётчик
+     * сбрасывается, когда главный кадр страницы догрузился (`onPageFinished`).
      */
     const val MAX_WEBVIEW_RECREATIONS = 1
 
-    /** Что делать, когда процесс страницы погиб ([terminationsBefore] — сколько гибелей уже было за показ). */
-    fun renderProcessGoneAction(terminationsBefore: Int): RenderProcessGoneAction =
-        if (terminationsBefore < MAX_WEBVIEW_RECREATIONS) RenderProcessGoneAction.RECREATE
-        else RenderProcessGoneAction.GIVE_UP
+    /**
+     * Что делать, когда процесс страницы погиб.
+     *
+     * [didCrash] — `RenderProcessGoneDetail.didCrash()`: `true` — настоящее падение
+     * (идёт в лимит), `false` — система выгрузила процесс ради памяти (обычно
+     * приложение в фоне, человек ушёл платить в банк) — это не срыв показа и в
+     * лимит не идёт никогда.
+     *
+     * [isResumed] — экран на переднем плане: загрузка сразу; иначе — отложить до
+     * возврата на экран (грузить страницу в фоне незачем, система её снова выгрузит).
+     *
+     * [crashesInARow] — сколько настоящих падений подряд было до этой гибели;
+     * в ответе — сколько стало.
+     */
+    fun renderProcessGoneDecision(didCrash: Boolean, isResumed: Boolean, crashesInARow: Int): RenderProcessGoneDecision {
+        if (didCrash && crashesInARow >= MAX_WEBVIEW_RECREATIONS) {
+            return RenderProcessGoneDecision(RenderProcessGoneAction.GIVE_UP, crashesInARow + 1)
+        }
+        val crashesAfter = if (didCrash) crashesInARow + 1 else crashesInARow
+        val action = if (isResumed) RenderProcessGoneAction.RELOAD_NOW else RenderProcessGoneAction.RELOAD_ON_RESUME
+        return RenderProcessGoneDecision(action, crashesAfter)
+    }
 
     /** Приоритет рендерера на момент гибели — именем для журнала (константы WebView API 26). */
     fun rendererPriorityName(priority: Int): String = when (priority) {
@@ -60,9 +79,15 @@ internal object EmbeddedWebViewPolicy {
     fun reactsToLoadError(isForMainFrame: Boolean): Boolean = isForMainFrame
 }
 
+/** Решение по гибели процесса страницы: действие и счётчик падений подряд после неё. */
+internal data class RenderProcessGoneDecision(val action: RenderProcessGoneAction, val crashesInARow: Int)
+
 internal enum class RenderProcessGoneAction {
-    /** Убрать погибший WebView, создать новый и загрузить адрес заново. */
-    RECREATE,
+    /** Новый WebView уже поставлен — загрузить адрес сразу (экран на переднем плане). */
+    RELOAD_NOW,
+
+    /** Новый WebView уже поставлен — загрузить адрес при возврате на экран (`onResume`). */
+    RELOAD_ON_RESUME,
 
     /** Закрыть показ с результатом «недоступно». */
     GIVE_UP,
