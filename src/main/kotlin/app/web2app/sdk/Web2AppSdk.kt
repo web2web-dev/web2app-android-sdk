@@ -1,9 +1,13 @@
 package app.web2app.sdk
 
+import android.app.Activity
+import android.app.Application
 import android.content.Context
+import android.os.Bundle
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArraySet
 
 /**
  * web2app SDK — публичная поверхность (4 точки, Web2Wave-стиль). WEB-434.
@@ -31,6 +35,21 @@ object Web2AppSdk {
 
     /** WEB-1384: метка первой неудачной попытки отпечатка (окно 2 часа). */
     private var fingerprintGate: FingerprintAttemptGate? = null
+
+    /**
+     * Незавершённые `openWebPaywall` (окно браузера), которые ждут оплату.
+     * WEB-2479: не пусто — окно библиотеки «открыто», возвратный метод код не тратит.
+     * WEB-2480: результат возвратного метода уходит и в них.
+     */
+    internal val customTabWaits = CopyOnWriteArraySet<CustomTabWait>()
+
+    /**
+     * WEB-2479 п.2: окно оплаты библиотеки открыто — идёт незавершённый
+     * `openWebPaywall` (окно браузера) или встроенный показ. Открыто → возвратный
+     * метод код из ссылки не тратит (решение владельца 06.10).
+     */
+    internal fun isLibraryWindowOpen(): Boolean =
+        customTabWaits.isNotEmpty() || EmbeddedPaywallPresentations.active() != null
 
     /** 0.7.2: «id пейволла → адрес» на час для встроенного показа по id. */
     private val paywallUrlCache = PaywallUrlCache()
@@ -180,10 +199,18 @@ object Web2AppSdk {
     }
 
     /**
-     * Для проектов с MMP (AppsFlyer/Adjust): интегратор передаёт токен из своего MMP-callback.
-     * ⚠ Токен лежит в `deep_link_sub1` (продублирован в `af_sub1`), а НЕ в `deep_link_value` —
-     * там наш бэкенд ставит константу `handoff`, и опознание с ней молча не сработает.
-     * **[POC-1]** — валидируется на реальном девайсе (доезжает ли токен).
+     * Обмен кода на guid: токен из MMP-callback (AppsFlyer/Adjust) или код из
+     * ссылки возврата / письма восстановления.
+     * ⚠ Токен MMP лежит в `deep_link_sub1` (продублирован в `af_sub1`), а НЕ в
+     * `deep_link_value` — там наш бэкенд ставит константу `handoff`, и опознание с
+     * ней молча не сработает. **[POC-1]** — валидируется на реальном девайсе.
+     *
+     * Код обменивается всегда, даже если guid уже сохранён: успех → новый guid
+     * перезаписывает сохранённый. WEB-2479: сервер отверг код (погашен или
+     * просрочен, 404), а guid сохранён → успех с сохранённым guid (повторный
+     * переход по той же ссылке — не ошибка, в журнал
+     * `identify.code_rejected_cached_guid`; раньше — ошибка). Сбой сети или
+     * сервера — ошибка, как раньше.
      */
     fun identifyWithDeepLinkValue(token: String, onResult: (Result<String>) -> Unit) {
         val deliver = MainThread.wrap(onResult)
@@ -192,23 +219,65 @@ object Web2AppSdk {
             SdkLogger.error("identify.not_configured")
             return deliver(Result.failure(IllegalStateException("not configured")))
         }
-        SdkLogger.log("identify.resolving_token")
-        AttributionResolver(cfg).resolveToken(token) { result ->
-            result.onSuccess { guid ->
-                guidStore.save(guid)
-                // 0.7.2: guid сменился — кэш адресов пейволла сбрасываем.
-                paywallUrlCache.clear()
-                SdkLogger.setGuid(guid)
-                SdkLogger.log("identify.resolved")
-                AppCallbackProducer(cfg).reportAppInstalled(guid)
-            }.onFailure {
-                SdkLogger.error("identify.resolve_failed", it.message ?: "")
-            }
-            deliver(result)
+        exchangeCode(cfg, token) { outcome ->
+            deliver(
+                when (outcome) {
+                    is CodeExchangeOutcome.Exchanged -> Result.success(outcome.guid)
+                    is CodeExchangeOutcome.KeptCached -> Result.success(outcome.guid)
+                    is CodeExchangeOutcome.Failed -> Result.failure(outcome.error)
+                },
+            )
         }
     }
 
-    /** Читает право по сохранённому guid — passthrough `GET /public/entitlement?guid=`. */
+    /**
+     * WEB-2479 — обмен кода (общий для [identifyWithDeepLinkValue] и
+     * [handleReturnUrl]). Итог — по [ReturnCodeRules.outcome]; побочные эффекты
+     * (перезапись guid, APP_INSTALLED, журнал) — здесь.
+     */
+    private fun exchangeCode(
+        cfg: Web2AppConfig,
+        code: String,
+        onOutcome: (CodeExchangeOutcome) -> Unit,
+    ) {
+        SdkLogger.log("identify.resolving_token")
+        AttributionResolver(cfg).resolveToken(code) { result ->
+            val cached = if (::guidStore.isInitialized) {
+                runCatching { guidStore.load() }.getOrNull()
+            } else {
+                null
+            }
+            val outcome = ReturnCodeRules.outcome(result, cached)
+            when (outcome) {
+                is CodeExchangeOutcome.Exchanged -> {
+                    guidStore.save(outcome.guid)
+                    // 0.7.2: guid сменился — кэш адресов пейволла сбрасываем.
+                    paywallUrlCache.clear()
+                    SdkLogger.setGuid(outcome.guid)
+                    SdkLogger.log("identify.resolved")
+                    AppCallbackProducer(cfg).reportAppInstalled(outcome.guid)
+                }
+                is CodeExchangeOutcome.KeptCached -> {
+                    SdkLogger.setGuid(outcome.guid)
+                    SdkLogger.log(
+                        "identify.code_rejected_cached_guid",
+                        "сервер отверг код (погашен или просрочен) — отдан сохранённый guid",
+                        level = "warn",
+                    )
+                }
+                is CodeExchangeOutcome.Failed ->
+                    SdkLogger.error("identify.resolve_failed", outcome.error.message ?: "")
+            }
+            onOutcome(outcome)
+        }
+    }
+
+    /**
+     * Читает право по сохранённому guid — `GET /public/entitlement?guid=`: первая
+     * действующая запись ответа, а если действующих нет — самая новая (WEB-2480).
+     * null означает И «записей нет», И «не удалось спросить» (сеть, сервер) —
+     * чтобы различать, зовите [entitlements].
+     */
     fun entitlement(onResult: (EntitlementGrant?) -> Unit) {
         val deliver = MainThread.wrap(onResult)
         val cfg = config
@@ -231,6 +300,56 @@ object Web2AppSdk {
         }
     }
 
+    /**
+     * WEB-2480 — все записи о доступе по сохранённому guid с различимой причиной
+     * отказа. В отличие от [entitlement], «нет записей» ([EntitlementsResult.Success]
+     * с пустым `grants`) здесь отличается от «не удалось спросить»
+     * ([EntitlementsResult.Network], [EntitlementsResult.Http]) — при сбое сети не
+     * отнимайте доступ, спросите позже. Результат — на главном потоке.
+     *
+     * ```
+     * Web2AppSdk.entitlements { r ->
+     *     when (r) {
+     *         is EntitlementsResult.Success -> if (r.entitlements.activeGrant != null) unlock() else lock()
+     *         EntitlementsResult.Network, is EntitlementsResult.Http -> Unit // оставить как есть
+     *         else -> lock()
+     *     }
+     * }
+     * ```
+     */
+    fun entitlements(onResult: (EntitlementsResult) -> Unit) {
+        val deliver = MainThread.wrap(onResult)
+        val cfg = config
+        if (cfg == null) {
+            SdkLogger.log("entitlements.skipped", "нет configure", level = "warn")
+            return deliver(EntitlementsResult.NotConfigured)
+        }
+        val guid = if (::guidStore.isInitialized) runCatching { guidStore.load() }.getOrNull() else null
+        if (guid == null) {
+            SdkLogger.log("entitlements.skipped", "нет сохранённого guid", level = "warn")
+            return deliver(EntitlementsResult.NoGuid)
+        }
+        SdkLogger.log("entitlements.fetch")
+        EntitlementClient(cfg).fetchAll(guid) { result ->
+            if (result is EntitlementsResult.Success) {
+                SdkLogger.log(
+                    "entitlements.result",
+                    context = mapOf(
+                        "count" to result.entitlements.grants.size.toString(),
+                        "active" to (result.entitlements.activeGrant != null).toString(),
+                    ),
+                )
+            } else {
+                SdkLogger.error(
+                    "entitlements.failed",
+                    (result as? EntitlementsResult.Http)?.let { "http ${it.code}" }
+                        ?: (result::class.simpleName ?: "unknown"),
+                )
+            }
+            deliver(result)
+        }
+    }
+
     /** Текущий guid (client-held ключ). */
     fun currentGuid(): String? =
         if (::guidStore.isInitialized) guidStore.load() else null
@@ -242,7 +361,10 @@ object Web2AppSdk {
      * Возврат = **guid-поллинг** (ратиф. PM 2026-07-07): SDK кейит checkout на СВОЙ guid
      * (`?origin=app&email=&guid=`), затем поллит [entitlement] по нему — БЕЗ resolve-by-email
      * (тот S2S-HMAC, мобильному недоступен). Custom Tab не даёт надёжного close-колбэка, поэтому
-     * поллинг стартует сразу после запуска (юзер платит и возвращается — грант ловится в окне).
+     * поллинг стартует сразу после запуска, а с WEB-2480 окно ожидания (≈60 с)
+     * начинается заново при каждом возвращении приложения на передний план: долгая оплата во
+     * вкладке не даёт «не оплачено», null приходит только через ≈60 с после возвращения.
+     * Результат [handleReturnUrl] тоже приходит сюда — [onResult] зовётся ровно один раз.
      *
      * [paywallUrl] — URL опубликованного веб-пейвола (кастом-домен клиента; наши apex/поддомены
      * пейволы не отдают — WEB-395). [email] — опц. prefill (юзер может поправить на вебе).
@@ -319,35 +441,76 @@ object Web2AppSdk {
         )
         CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
 
-        // Поллим право по нашему guid: 30 попыток × 2с ≈ 60с (покрывает Stripe webhook→grant).
+        // Поллим право по нашему guid: окно 30 попыток × 2с ≈ 60с (покрывает Stripe
+        // webhook→grant). WEB-2480: окно перезапускается при каждом возвращении
+        // приложения на передний план — долгая оплата во вкладке не даёт «не оплачено».
         val client = EntitlementClient(cfg)
-        WebPaywallLauncher.pollForActiveGrant(
-            intervalMs = 2_000,
-            maxAttempts = 30,
-            fetch = { cb -> client.fetch(guid, cb) },
-            completion = { grant ->
+        val app = context.applicationContext as? Application
+        var lifecycle: Application.ActivityLifecycleCallbacks? = null
+        lateinit var wait: CustomTabWait
+        wait = CustomTabWait(
+            startPoll = { shouldContinue, onDone ->
+                WebPaywallLauncher.pollForActiveGrant(
+                    intervalMs = 2_000,
+                    maxAttempts = 30,
+                    fetch = { cb -> client.fetch(guid, cb) },
+                    completion = onDone,
+                    shouldContinue = shouldContinue,
+                )
+            },
+            deliver = { grant ->
+                customTabWaits.remove(wait)
+                lifecycle?.let { cb -> MainThread.post { app?.unregisterActivityLifecycleCallbacks(cb) } }
                 SdkLogger.log(
                     "paywall.poll_result",
                     context = mapOf("active" to (grant != null).toString()),
                 )
                 deliver(grant)
             },
+            lifecycleAvailable = app != null,
         )
+        if (app != null) {
+            lifecycle = object : Application.ActivityLifecycleCallbacks {
+                override fun onActivityResumed(activity: Activity) {
+                    if (wait.isFinished) return
+                    SdkLogger.log("paywall.app_resumed_restart_wait")
+                    wait.onAppResumed()
+                }
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+                override fun onActivityStarted(activity: Activity) = Unit
+                override fun onActivityPaused(activity: Activity) {
+                    // Доработка 4: ушёл с экрана (снова во вкладку) — окно на паузе.
+                    // Переход между своими экранами: pause → resume следующего, пауза снимается.
+                    wait.onAppPaused()
+                }
+                override fun onActivityStopped(activity: Activity) = Unit
+                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+                override fun onActivityDestroyed(activity: Activity) = Unit
+            }.also { app.registerActivityLifecycleCallbacks(it) }
+        }
+        customTabWaits.add(wait)
+        wait.start()
     }
 
     /**
      * WEB-813 — обработчик возвратного deep-link'а из веб-пейволла (паритет iOS
-     * handleReturnURL 0.3.0): кнопка «Закрыть» на success-экране ведёт на
-     * `<схема-прилки>://handoff?code=...` (WEB-800). Интегратор: (1) объявляет
-     * intent-filter своей схемы и указывает её в кабинете проекта
-     * (bridgeConfig.returnScheme); (2) зовёт этот метод из onCreate/onNewIntent
-     * для ВСЕХ входящих deep-link — чужие вернут false.
+     * handleReturnURL): кнопки «Закрыть» и «Открыть приложение (альтернативный
+     * способ)» на success-экране ведут на `<схема-прилки>://handoff?code=...`
+     * (WEB-800). Интегратор: (1) объявляет intent-filter своей схемы и указывает
+     * её в кабинете проекта (bridgeConfig.returnScheme); (2) зовёт этот метод из
+     * onCreate/onNewIntent для ВСЕХ входящих deep-link — чужие вернут false.
      *
-     * При распознавании: приложение уже на переднем плане (deep-link вывел его
-     * поверх Custom Tab) — SDK запускает НЕМЕДЛЕННЫЙ короткий поллинг права
-     * (не ждёт планового окна исходного openWebPaywall) и отдаёт грант в
-     * [onResult]. `code` из ссылки намеренно НЕ консьюмится: доступ приходит по
-     * guid, а токен остаётся валидным для магик-линк письма.
+     * При распознавании (WEB-2479):
+     *  - **окно библиотеки открыто** (идёт незавершённый [openWebPaywall] или
+     *    встроенный показ) — короткий опрос права по guid библиотеки (10 × 1 с),
+     *    результат в [onResult]. Действующая запись нашлась — `code` НЕ тратится:
+     *    он остаётся живым для письма «оплата прошла» (открыть приложение на втором
+     *    устройстве). Не нашлась, а `code` есть (решение владельца 07.10: бросил
+     *    окно и оплатил в обычном браузере) — `code` обменивается, как ниже;
+     *  - **окна нет** (покупатель платил в обычном браузере или пришёл из письма) —
+     *    `code` обменивается тем же путём, что [identifyWithDeepLinkValue] (guid
+     *    может смениться), затем тот же короткий опрос права по новому guid.
+     *    Обмен не удался — [onResult] получает null.
      */
     @JvmOverloads
     fun handleReturnUrl(
@@ -359,19 +522,55 @@ object Web2AppSdk {
         SdkLogger.log("return_url.recognized")
         val deliver = MainThread.wrap(onResult)
         val cfg = config
-        val guid = if (::guidStore.isInitialized) guidStore.load() else null
-        if (cfg == null || guid == null) {
+        if (cfg == null || !::guidStore.isInitialized) {
             deliver(null)
             return true
         }
         val client = EntitlementClient(cfg)
-        WebPaywallLauncher.pollForActiveGrant(
-            intervalMs = 1_000,
-            maxAttempts = 10,
-            fetch = { cb -> client.fetch(guid, cb) },
+        runReturnFlow(
+            url,
+            exchange = { code, cb -> exchangeCode(cfg, code, cb) },
+            pollStoredGuid = { cb ->
+                val guid = runCatching { guidStore.load() }.getOrNull()
+                if (guid == null) {
+                    cb(null)
+                } else {
+                    WebPaywallLauncher.pollForActiveGrant(
+                        intervalMs = 1_000,
+                        maxAttempts = 10,
+                        fetch = { done -> client.fetch(guid, done) },
+                        completion = cb,
+                    )
+                }
+            },
             completion = deliver,
         )
         return true
+    }
+
+    /**
+     * Ход возвратного метода с подставляемыми сетевыми шагами (доработка 4: тесты
+     * подключения). Решение «окно открыто» — из [isLibraryWindowOpen]; результат
+     * получают и незавершённые ожидания `openWebPaywall` (WEB-2480, критерий
+     * WEB-811 → WEB-813), и [completion] — каждый ровно один раз.
+     */
+    internal fun runReturnFlow(
+        url: String,
+        exchange: (code: String, onOutcome: (CodeExchangeOutcome) -> Unit) -> Unit,
+        pollStoredGuid: (onResult: (EntitlementGrant?) -> Unit) -> Unit,
+        completion: (EntitlementGrant?) -> Unit,
+    ) {
+        val waits = customTabWaits.toList()
+        val windowOpen = isLibraryWindowOpen()
+        SdkLogger.log("return_url.action", context = mapOf("windowOpen" to windowOpen.toString()))
+        ReturnUrlFlow(
+            windowOpen = windowOpen,
+            exchange = exchange,
+            pollStoredGuid = pollStoredGuid,
+        ).run(ReturnCodeRules.codeFromReturnUrl(url)) { grant ->
+            waits.forEach { it.offer(grant) }
+            completion(grant)
+        }
     }
 
     /** Перегрузка для intent.data. */

@@ -41,7 +41,7 @@ class EntitlementGrantTest {
               {"level":"test","status":"active","expires_at":null,"price_id":"test","testMode":true}
             ]}
         """.trimIndent()
-        val g = EntitlementClient.parseFirstGrant(body)
+        val g = EntitlementClient.parseGrant(body)
         assertNotNull(g)
         assertTrue(g!!.testMode)
         assertTrue(g.isActive) // isActive не меняли: активен, но помечен тестовым
@@ -55,7 +55,7 @@ class EntitlementGrantTest {
               {"level":"price_abc","status":"active","expires_at":null,"price_id":"price_abc","testMode":false}
             ]}
         """.trimIndent()
-        val g = EntitlementClient.parseFirstGrant(body)
+        val g = EntitlementClient.parseGrant(body)
         assertNotNull(g)
         assertFalse(g!!.testMode)
         assertTrue(g.isActive)
@@ -69,7 +69,7 @@ class EntitlementGrantTest {
               {"level":"price_abc","status":"active","expires_at":null,"price_id":"price_abc"}
             ]}
         """.trimIndent()
-        val g = EntitlementClient.parseFirstGrant(body)
+        val g = EntitlementClient.parseGrant(body)
         assertNotNull(g)
         assertFalse(g!!.testMode)
         assertEquals("price_abc", g.priceId)

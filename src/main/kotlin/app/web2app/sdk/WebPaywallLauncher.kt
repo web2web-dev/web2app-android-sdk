@@ -110,11 +110,15 @@ internal object WebPaywallLauncher {
      * грант, как только он active; отдаёт null, если active-грант не появился в бюджете попыток.
      * [fetch] инъектируется (сеть/тест) — оркестрация POC-независима. Задержка между попытками
      * на daemon-потоке (не блокирует вызывающий).
+     *
+     * [shouldContinue] (WEB-2480) проверяется перед каждой попыткой: false — опрос
+     * тихо прекращается БЕЗ [completion] (окно заменено новым или ответ уже отдан).
      */
     fun pollForActiveGrant(
         intervalMs: Long,
         maxAttempts: Int,
         fetch: (onResult: (EntitlementGrant?) -> Unit) -> Unit,
+        shouldContinue: () -> Boolean = { true },
         completion: (EntitlementGrant?) -> Unit,
     ) {
         if (maxAttempts <= 0) {
@@ -122,6 +126,7 @@ internal object WebPaywallLauncher {
             return
         }
         fun attempt(n: Int) {
+            if (!shouldContinue()) return
             fetch { grant ->
                 when {
                     grant != null && grant.isActive -> completion(grant)

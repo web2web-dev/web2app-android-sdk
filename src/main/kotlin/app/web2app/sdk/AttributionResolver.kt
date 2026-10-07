@@ -21,7 +21,9 @@ internal class AttributionResolver(private val config: Web2AppConfig) {
                 // В журнал — с HTTP-кодом (0 = сетевое исключение, 404 =
                 // унифицированный негатив бэка). Паритет iOS resolve.failed.
                 SdkLogger.error("resolve.failed", context = mapOf("http" to resp.code.toString()))
-                onResult(Result.failure(IllegalStateException("resolve failed")))
+                // WEB-2479: HTTP-код в исключении — по нему identify отличает «код
+                // погашен» (404) от сбоя сети/сервера.
+                onResult(Result.failure(ResolveFailedException(resp.code)))
             }
         }
     }

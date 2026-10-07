@@ -61,9 +61,13 @@ Web2AppSdk.identify(
 )
 
 // 3. Проверка доступа — в любой момент, чтобы открыть/закрыть платный контент.
-Web2AppSdk.entitlement { grant ->
-    if (grant?.isActive == true) {
-        // разблокировать доступ
+Web2AppSdk.entitlements { result ->
+    when (result) {
+        is EntitlementsResult.Success ->
+            if (result.entitlements.activeGrant != null) { /* разблокировать */ } else { /* закрыть */ }
+        EntitlementsResult.Network, is EntitlementsResult.Http ->
+            Unit // нет связи с сервером — НЕ отнимайте доступ, спросите позже
+        else -> Unit // нет configure / guid ещё не сохранён
     }
 }
 ```
@@ -105,15 +109,16 @@ Web2AppSdk.entitlement { grant ->
 | `configure(context, projectId, baseUrl, warmUpWebView = true)` | Инициализация SDK. Вызвать один раз при старте. `warmUpWebView = false` выключает прогрев движка WebView (см. «Отличия от iOS SDK»). |
 | `identify(onResult, onNeedEmail)` | Опознать пользователя. Порядок: сохранённый guid → Install Referrer → отпечаток устройства; только если промахнулось всё — `onNeedEmail`. |
 | `requestEmailRecovery(email, onResult)` | Запросить восстановление по email — мы отправим пользователю ссылку-магнит. |
-| `entitlement { grant -> }` | Получить текущий доступ (`grant.isActive`, `level`, `status`, `expiresAt`, `testMode` — см. «Тестовый режим проекта»). |
+| `entitlements { result -> }` | Все записи о доступе (`grants`, `activeGrant`, `testMode`) с различимой причиной отказа: «записей нет» — `Success` с пустым списком; `Network` / `Http` — не удалось спросить (доступ не отнимать); `NotConfigured`, `NoGuid`, `BadResponse`. |
+| `entitlement { grant -> }` | Текущий доступ одной записью: первая действующая, а если действующих нет — самая новая (`grant.isActive`, `level`, `status`, `expiresAt`, `testMode` — см. «Тестовый режим проекта»). `null` — и «записей нет», и «нет сети»: чтобы различать, зовите `entitlements`. |
 | `currentGuid()` | Текущий идентификатор пользователя (если уже опознан). |
-| `openWebPaywall(context, paywallUrl, email) { grant -> }` | Показать веб-пейволл в Chrome Custom Tab; доступ придёт по guid-поллингу. |
+| `openWebPaywall(context, paywallUrl, email) { grant -> }` | Показать веб-пейволл в Chrome Custom Tab; доступ придёт по guid-поллингу. `onResult` — только после возвращения в приложение: запись сразу, как найдена, `null` — через ≈60 с после возвращения. |
 | `openWebPaywallById(context, paywallId, email) { grant -> }` | То же по ID пейволла из кабинета — URL резолвится сам. |
 | `openWebPaywallEmbedded(context, paywallUrl, email) { result -> }` | Встроенный показ (WebView + JS-мост): авто-закрытие на успехе, типизированный `PaywallResult`. |
 | `openWebPaywallEmbeddedById(context, paywallId, email) { result -> }` | Встроенный показ по ID пейволла. |
 | `openQuizEmbedded(context, quizUrl, email) { result -> }` | Встроенный показ КВИЗА (тот же WebView + мост). События прохождения идут в слушатель, колбэк — про закрытие экрана (`QuizResult`). |
-| `handleReturnUrl(uri) { grant -> }` | Обработать возвратную ссылку `<схема>://handoff` (кнопка «Закрыть» на success-экране). |
-| `identifyWithDeepLinkValue(code) { result -> }` | Опознать по одноразовому коду — из ссылки в письме после оплаты или из MMP-коллбека (AppsFlyer/Adjust). Возвращает `guid`. |
+| `handleReturnUrl(uri) { grant -> }` | Обработать возвратную ссылку `<схема>://handoff?code=…` (кнопки «Закрыть» и «альтернативный способ» на экране после оплаты): окно SDK открыто и доступ по сохранённому guid есть — код не тратит; окна нет или доступа по сохранённому guid нет (платили в обычном браузере) — обменивает код. |
+| `identifyWithDeepLinkValue(code) { result -> }` | Опознать по одноразовому коду — из ссылки в письме после оплаты или из MMP-коллбека (AppsFlyer/Adjust). Код обменивается всегда, `guid` может смениться; код уже погашен, а `guid` сохранён — успех с сохранённым. Возвращает `guid`. |
 | `setFunnelEventListener { name, data -> }` | Слушать события прохождения квиза из встроенного показа. Пейволл они не закрывают — см. раздел ниже. |
 
 Все пять методов показа принимают ещё два необязательных именованных параметра —
@@ -190,9 +195,18 @@ override fun onCreate(savedInstanceState: Bundle?) {
 }
 ```
 
-При распознавании SDK сразу коротко поллит доступ (не ждёт планового окна) —
-пользователь возвращается «уже платным». `code` из ссылки SDK намеренно не
-использует: доступ приходит по guid, а токен остаётся валидным для письма.
+Два случая:
+
+- **Идёт `openWebPaywall`** (покупатель платил во вкладке, открытой SDK) — SDK сразу
+  коротко опрашивает доступ по guid (не ждёт планового окна); результат получают и
+  этот `onResult`, и `onResult` исходного `openWebPaywall` — каждый ровно один раз.
+  `code` из ссылки при этом **не тратится**, если по guid нашлась действующая запись:
+  он остаётся живым для письма «оплата прошла» (например, чтобы открыть приложение
+  на втором устройстве). Если действующей записи нет (покупатель бросил окно SDK и
+  оплатил в обычном браузере), SDK обменивает `code`, как во втором случае.
+- **Окна SDK нет** (покупатель прошёл воронку в обычном браузере) — SDK обменивает
+  `code` так же, как `identifyWithDeepLinkValue` (`currentGuid()` может смениться),
+  и отдаёт доступ по новому guid.
 
 ## Встроенный веб-пейволл (WebView + JS-мост)
 
@@ -382,8 +396,13 @@ Web2AppSdk.setFunnelEventListener(null) // отписаться
 это не баги и не отставание, а следствие платформы:
 
 - **Поллинг права в не-embedded `openWebPaywall` стартует сразу**, а не после
-  закрытия пейволла: Chrome Custom Tab не отдаёт приложению колбэк закрытия, так
-  что «момент возврата» отследить нечем.
+  закрытия пейволла: Chrome Custom Tab не отдаёт приложению колбэк закрытия. Окно
+  ожидания (≈60 с) начинается заново при каждом возвращении приложения на передний
+  план, поэтому долгая оплата во вкладке не даёт «не оплачено». Следствие для
+  интеграции: `onResult` приходит только после возвращения в приложение (действующая
+  запись — сразу, как найдена; `null` — через ≈60 с после возвращения). Пока
+  покупатель во вкладке (в том числе ушёл туда повторно), `null` не приходит: окно
+  ожидания на паузе, пока приложение не на экране.
 - **`handleReturnUrl` имеет собственный `onResult` с грантом** — возврат по
   своей схеме приходит в отдельную точку входа (в iOS результат приезжает иначе).
 - **Имена `openWebPaywallById` / `openWebPaywallEmbeddedById`** вместо перегрузок
@@ -501,11 +520,12 @@ private fun handleIncomingLink(intent: Intent?) {
                 Web2AppSdk.entitlement { grant ->
                     if (grant?.isActive == true) unlockPremium()
                 }
+                // Код обменивается всегда — guid мог смениться: передайте
+                // Web2AppSdk.currentGuid() своему серверу, если храните его там.
             }.onFailure {
-                // Код одноразовый (повторный тап по письму = ошибка). guid уже
-                // мог быть сохранён ранее — сперва проверьте entitlement(), и
-                // только при пустом ответе показывайте экран «введите email» с
-                // requestEmailRecovery(email).
+                // Код отвергнут, а guid ещё не сохранён, или нет сети (повторный
+                // переход по той же ссылке при сохранённом guid — успех, не ошибка).
+                // Предложите экран «введите email» с requestEmailRecovery(email).
             }
         }
     }
@@ -513,8 +533,8 @@ private fun handleIncomingLink(intent: Intent?) {
 ```
 
 Не путать с кнопкой «Закрыть»: её ссылка — кастомная схема
-`<схема>://handoff?code=...`, она обрабатывается `handleReturnUrl(uri)` и код
-намеренно не тратит (доступ приходит по guid-поллингу). Ссылка из письма —
+`<схема>://handoff?code=...`, она обрабатывается `handleReturnUrl(uri)` и тратит
+код, только если окна SDK нет или доступа по сохранённому guid нет. Ссылка из письма —
 https App Link с кодом в пути, её обрабатывает `identifyWithDeepLinkValue(code)`
 и код расходует.
 
